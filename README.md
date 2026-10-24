@@ -19,10 +19,6 @@
 
 git으로 설치했다면 **실리태번을 켤 때마다 자동으로 최신 버전으로 업데이트**돼요. `config.yaml`의 `enableServerPluginsAutoUpdate: true`가 실리태번 기본값이고, git이 설치돼 있어야 해요. 자동 업데이트를 원하지 않으면 그 값을 `false`로 바꾸고, 필요할 때 이 폴더에서 `git pull`을 실행하면 돼요.
 
-git을 쓸 수 없다면 **Code → Download ZIP**으로 받아 파일을 `plugins/naice-shot-server/`에 복사해도 돼요. 이 경우 업데이트도 직접 복사해야 해요.
-
-예전에 ZIP에서 `server` 폴더를 복사해 설치했다면, 그 `plugins/naice-shot-server/` 폴더를 지우고 위처럼 git으로 다시 받아 주세요. 생성 이력과 그림은 이 폴더 밖에 있어서 그대로 남아요.
-
 ## What it does (English)
 
 - Routes under `/api/plugins/naice-shot/`: `status`, `history`, `generate`, `delete`.
