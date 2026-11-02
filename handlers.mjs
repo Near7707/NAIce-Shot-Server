@@ -54,7 +54,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.7';
+const SERVER_VERSION='0.1.8';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.0';
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';

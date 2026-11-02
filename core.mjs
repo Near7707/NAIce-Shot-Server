@@ -1,4 +1,4 @@
-export const VERSION = '0.1.7';
+export const VERSION = '0.1.8';
 export const BRAND = 'NAIce Shot';
 export const SIZE_PRESETS = {
   portrait:{label:'세로 · 832 × 1216',width:832,height:1216},
@@ -32,6 +32,20 @@ export function textSignature(text) {
 export function blankScene() {
   return { characters: [], unregistered: [], interaction: '', location: '', lighting: '', camera: '', source: null };
 }
+// A profile's wardrobe: named outfits to pick from. It never changes the default outfit; a missing list is empty.
+export const WARDROBE_LIMIT = 50;
+export function validateWardrobe(value) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > WARDROBE_LIMIT) throw new Error(`옷장은 프로필마다 최대 ${WARDROBE_LIMIT}벌까지 저장할 수 있어요.`);
+  const ids = new Set();
+  return value.map(w => {
+    if (!w || typeof w.id !== 'string' || !/^[\w-]{1,80}$/.test(w.id) || ids.has(w.id)) throw new Error('옷장 항목 ID가 잘못되었거나 중복됐어요.');
+    ids.add(w.id);
+    if (typeof w.name !== 'string' || !w.name.trim() || w.name.length > 80) throw new Error('옷 이름을 1~80자로 입력해 주세요.');
+    if (typeof w.outfit !== 'string' || !w.outfit.trim() || w.outfit.length > 12000) throw new Error(`"${w.name.trim()}" 옷의 태그가 비어 있거나 너무 길어요.`);
+    return { id:w.id, name:w.name.trim(), outfit:w.outfit.trim() };
+  });
+}
 export function validateProfiles(value) {
   if (!Array.isArray(value) || value.length > 100) throw new Error('프로필은 최대 100개까지 지원해요.');
   const ids = new Set();
@@ -44,7 +58,8 @@ export function validateProfiles(value) {
     if (!p.name.trim() || !['boy','girl','other'].includes(p.subject)) throw new Error('프로필 이름과 인원 태그를 확인해 주세요.');
     if (!Array.isArray(p.aliases) || p.aliases.some(x => typeof x !== 'string' || x.length > 100)) throw new Error('별칭 목록을 확인해 주세요.');
     return { id:p.id, name:p.name.trim(), aliases:p.aliases, subject:p.subject, appearance:p.appearance,
-      defaultOutfit:p.defaultOutfit, positive:p.positive, negative:p.negative, cardKey:typeof p.cardKey === 'string' ? p.cardKey : '' };
+      defaultOutfit:p.defaultOutfit, positive:p.positive, negative:p.negative, cardKey:typeof p.cardKey === 'string' ? p.cardKey : '',
+      wardrobe:validateWardrobe(p.wardrobe) };
   });
 }
 const str = (o,k,max=12000) => {
