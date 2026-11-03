@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.12 — 2026-11-03
+
+- **NovelAI generation errors are named only when the reply says why:** `nai-auth` (401), `nai-anlas` (an Anlas/balance note), `nai-permission` (403 with a permission note), `nai-busy` (429), `nai-down` (5xx), otherwise `nai-rejected`. A status number alone never means "not enough Anlas". NovelAI's short note is appended (one line, ≤120 characters, tokens removed). Errors carry a `code` field.
+- **The consent block is separate:** generation refused because Anlas use is not allowed now answers 428 with `code:'anlas-consent'` (was 402).
+- Shared core: cost wording per account (Tablet/Scroll "이 생성은 Anlas를 사용해요.", Opus V5 "무료 사용량에 따라 Anlas가 차감될 수 있어요.", unknown account "비용 조건을 확인하지 못했어요.").
+- Advertise `nai-error-codes`. Validation: 24 server Node tests; extension 0.1.46 has 136 Node tests and 35 Chromium scripts passing.
+
 ## 0.1.11 — 2026-11-03
 
 - **Deletion markers for saved work.** Deleting work (one chat, all work, or with a chat's whole history) now replaces the file with `{revision, work:null, deleted:true}` instead of removing it. GET returns no work and the marker's revision; a save prepared before the deletion (another window's first save with `expectedRevision:null`, or an older revision) gets 409 instead of recreating the work. Markers hold no prompts or descriptions.

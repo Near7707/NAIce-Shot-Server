@@ -39,6 +39,7 @@ git으로 설치했다면 **실리태번을 켤 때마다 자동으로 최신 �
 - **NovelAI 키**는 실리태번이 보관한 것을 읽기만 하고, 기록이나 작업 파일에는 저장하지 않아요.
 - **추출 AI 응답 원문**은 확장 설정에서 직접 켰을 때만 저장돼요.
 - **파일 이름**(`naice-shot-<무작위 ID>.png`)에는 이름·계정·채팅 내용이 들어가지 않아요. 다만 원본 PNG 안에는 프롬프트·생성 설정이 남을 수 있어서, 다른 곳에 올릴 땐 확장에서 **공유용 PNG**로 저장하는 걸 추천해요.
+- **구독 등급:** Opus가 아니어도 쓸 수 있어요. Tablet·Scroll은 그림마다 Anlas가 들어서, 확장에서 **Anlas 사용 가능성 허용**을 켜야 생성돼요. 무료 체험 계정의 외부 API 사용은 확인되지 않았어요.
 - 데이터 폴더를 통째로 백업하거나 남에게 보낼 때는 위 폴더들도 함께 포함된다는 점을 기억해 주세요.
 
 ## 문제 해결
@@ -57,7 +58,7 @@ Routes live under `/api/plugins/naice-shot/` and are scoped to the authenticated
 | --- | --- |
 | `GET /status` | Version, feature flags and `minClient`. `?quick=1` skips the NovelAI subscription check. |
 | `GET /history` | Paged records for `chatKey`; `scope=all` lists every chat, with per-chat counts and total size. |
-| `POST /generate` | Calls NovelAI once per `requestId` (repeat IDs return the stored record), saves the PNG and record. |
+| `POST /generate` | Calls NovelAI once per `requestId` (repeat IDs return the stored record), saves the PNG and record. Refuses with 428 `anlas-consent` when the request may cost Anlas and `allowAnlas` is off. NovelAI failures carry a `code` (`nai-auth`, `nai-anlas`, `nai-permission`, `nai-busy`, `nai-down`, `nai-rejected`) and NovelAI's short note. |
 | `POST /delete` | Deletes chosen images of one chat, or `all:true` for that chat (also deletes its saved work; reports `workDeleted`). |
 | `GET /draft`, `POST /draft` | One saved work per `chatKey`. POST needs `expectedRevision` and returns a new revision; a stale revision gets 409 and nothing is replaced. `delete:true` deletes one work, `delete:true, all:true` all of the user's work. Deleting leaves a content-free marker with a new revision, so saves prepared before the deletion are refused. |
 

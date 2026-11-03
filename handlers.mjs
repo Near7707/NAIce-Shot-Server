@@ -6,7 +6,7 @@ import { buildPayload, costGuard, MODELS, stripReasoningBlocks } from './core.mj
 import {packWork} from './draft-work.mjs';
 
 class PublicError extends Error {
-  constructor(message,status=400){super(message);this.status=status;}
+  constructor(message,status=400,code=''){super(message);this.status=status;this.code=code;}
 }
 const ORIGIN='https://image.novelai.net';
 const PNG=Buffer.from([137,80,78,71,13,10,26,10]);
@@ -56,7 +56,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.11';
+const SERVER_VERSION='0.1.12';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
@@ -68,6 +68,23 @@ async function moveFile(from,to){try{await fs.rename(from,to);}catch(e){if(e.cod
 const workFolder=dirs=>path.join(dirs.root,'naice-shot-work');
 const workFile=(dirs,chatKey)=>path.join(workFolder(dirs),createHash('sha256').update(chatKey).digest('hex')+'.json');
 const FREE_TEXT_LIMIT=4000;
+// NovelAI's own short explanation, cleaned for display: one line, no credentials, at most 120 characters.
+export function naiNote(body){
+  let text=String(body??'');try{const j=JSON.parse(text);text=typeof j==='string'?j:j?.message??j?.error??j?.detail??text;}catch{}
+  text=String(text).replace(/Bearer\s+\S+/gi,'Bearer ***').replace(/pst-[A-Za-z0-9_-]+/g,'***').replace(/<[^>]*>/g,' ').replace(/[\u0000-\u001f\u007f]+/g,' ').replace(/\s+/g,' ').trim();
+  return text.length>120?text.slice(0,119)+'…':text;
+}
+// Names a NovelAI generation failure only when the reply makes the cause clear; otherwise says so and
+// shows NovelAI's own note. A status number alone never becomes "not enough Anlas".
+export function naiError(status,body){
+  const note=naiNote(body),tail='자동 재요청하지 않았어요.',with_=note?` (NovelAI ${status}: ${note})`:` (NovelAI ${status})`;
+  if(status===401)return new PublicError(`NAI 키를 확인해 주세요. ${tail}`,401,'nai-auth');
+  if(/anlas|training ?steps|(?:insufficient|not enough) (?:funds|balance|anlas|steps)/i.test(note)&&status>=400&&status<500)return new PublicError(`Anlas가 부족해요. ${tail}${with_}`,402,'nai-anlas');
+  if(status===403&&/permission|not allowed|subscription|tier|access|forbidden/i.test(note))return new PublicError(`이 모델의 사용 권한을 확인해 주세요. ${tail}${with_}`,403,'nai-permission');
+  if(status===429)return new PublicError(`NovelAI 요청이 많아요. 잠시 후 다시 시도해 주세요. ${tail}${with_}`,429,'nai-busy');
+  if(status>=500)return new PublicError(`NovelAI 쪽에 문제가 있어요. 잠시 후 다시 시도해 주세요. ${tail}${with_}`,502,'nai-down');
+  return new PublicError(`NovelAI가 요청을 거절했어요. 계정 상태와 생성 설정을 확인해 주세요. ${tail}${with_}`,502,'nai-rejected');
+}
 // Deleting saved work leaves a marker with a fresh revision and no content. A save prepared before the
 // deletion (in another window or device) still carries an older revision, so it is refused with 409
 // instead of quietly bringing the work back. Returns whether real work was removed.
@@ -133,9 +150,9 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
     return {tier:data.tier,perks:{unlimitedImageGeneration:data.perks?.unlimitedImageGeneration===true},
       anlas:{subscription:data.trainingStepsLeft?.fixedTrainingStepsLeft??null,purchased:data.trainingStepsLeft?.purchasedTrainingSteps??null}};
   };
-  const fail=(res,e)=>res.status(e instanceof PublicError?e.status:500).json({error:e instanceof PublicError?e.message:'요청 처리 중 내부 오류가 발생했어요. 설치 경로와 파일 접근 권한을 확인해 주세요.'});
+  const fail=(res,e)=>res.status(e instanceof PublicError?e.status:500).json({error:e instanceof PublicError?e.message:'요청 처리 중 내부 오류가 발생했어요. 설치 경로와 파일 접근 권한을 확인해 주세요.',...(e instanceof PublicError&&e.code?{code:e.code}:{})});
   const chatKeyOf=value=>{if(typeof value!=='string'||!value||value.length>1000)throw fail400('채팅 정보가 잘못됐어요.');return value;};
-  const features=['paged-history','delete','private-records','all-history','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone'];
+  const features=['paged-history','delete','private-records','all-history','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes'];
   return {
     draft:async(req,res)=>{try{
       const {dirs,user}=context(req),body=req.body??{};
@@ -218,12 +235,14 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         try{sub=await subscription(secret);}catch(e){if(b.allowAnlas!==true)throw e;}
         if(!secret)throw new PublicError('NAI 키가 없어요.',400);
         const guard=costGuard(b.options,sub);
-        if(!guard.free && b.allowAnlas!==true)throw new PublicError(guard.message,402);
+        // The extension's own consent block, distinct from NovelAI's errors (428, code anlas-consent).
+        if(!guard.free && b.allowAnlas!==true)throw new PublicError(`${guard.message} Anlas 사용 허용이 꺼져 있어서 보내지 않았어요.`,428,'anlas-consent');
         const upstream=await fetcher(`${ORIGIN}/ai/generate-image`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${secret}`},
           body:JSON.stringify(payload),signal:AbortSignal.timeout(timeoutMs)});
         if(!upstream.ok) {
-          // Do not return or log upstream account details or submitted RP text.
-          throw new PublicError(`NAI 생성 실패 (${upstream.status}). 자동 재요청하지 않았어요.`,upstream.status===429?429:502);
+          // Do not return or log upstream account details or submitted RP text; only NovelAI's short note.
+          let body='';try{body=(await readLimited(upstream,4096)).toString();}catch{}
+          throw naiError(upstream.status,body);
         }
         const png=extractPng(await readLimited(upstream,30*1024*1024));
         const item={id:requestId,created:new Date().toISOString(),chatKey:b.chatKey,

@@ -1,4 +1,4 @@
-export const VERSION = '0.1.11';
+export const VERSION = '0.1.12';
 export const BRAND = 'NAIce Shot';
 export const SIZE_PRESETS = {
   portrait:{label:'세로 · 832 × 1216',width:832,height:1216},
@@ -288,11 +288,14 @@ export function buildPayload(assembled,options) {
     v4_negative_prompt:{caption:{base_caption:assembled.negative,char_captions:captions(true)},use_coords:useCoords,use_order:false},
   }};
 }
+// What a generation may cost, worded for the account. kind: free | uses (Anlas is used) | may (Opus V5:
+// depends on the remaining free usage) | unknown (account not checked). Only `free` is sent without consent.
 export function costGuard(options,subscription) {
   const normal=options.width*options.height<=1048576 && options.steps<=28;
-  const freePerk=subscription?.perks?.unlimitedImageGeneration===true && subscription?.tier===3;
-  if(!normal)return {free:false,message:'기본 무료 조건을 넘었어요. Anlas를 사용할 수 있어요.'};
-  if(!freePerk)return {free:false,message:'Opus 무료 생성 특전을 확인하지 못했어요. Anlas를 사용할 수 있어요.'};
-  if(options.model.startsWith('nai-diffusion-5'))return {free:false,message:'V5의 무료 잔량과 이번 소비량을 확정할 수 없어요. Anlas 사용 가능성을 허용할 때만 전송해요.'};
-  return {free:true,message:'Opus·기본 해상도·28스텝 이내·1장의 무료 조건에 해당해요.'};
+  if(!subscription||typeof subscription.tier!=='number')return {free:false,kind:'unknown',message:'비용 조건을 확인하지 못했어요.'};
+  if(subscription.tier!==3)return {free:false,kind:'uses',message:'이 생성은 Anlas를 사용해요.'};
+  if(!normal)return {free:false,kind:'uses',message:'기본 무료 조건(기본 크기·28스텝 이하)을 넘어서 Anlas를 사용해요.'};
+  if(subscription.perks?.unlimitedImageGeneration!==true)return {free:false,kind:'unknown',message:'Opus 무료 생성 특전을 확인하지 못했어요. Anlas가 사용될 수 있어요.'};
+  if(options.model.startsWith('nai-diffusion-5'))return {free:false,kind:'may',message:'무료 사용량에 따라 Anlas가 차감될 수 있어요.'};
+  return {free:true,kind:'free',message:'Opus 무료 조건(기본 크기·28스텝 이하·1장)에 해당해요.'};
 }

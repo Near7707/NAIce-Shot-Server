@@ -6,7 +6,7 @@ import path from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {deflateRawSync} from 'node:zlib';
 import {pathToFileURL,fileURLToPath} from 'node:url';
-import {createHandlers,extractPng} from '../handlers.mjs';
+import {createHandlers,extractPng,naiError,naiNote} from '../handlers.mjs';
 import {DEFAULTS} from '../core.mjs';
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRz8AAAAASUVORK5CYII=','base64');
 function archive(data) {
@@ -17,14 +17,14 @@ function archive(data) {
   return Buffer.concat([local,name,packed,central,name,end]);
 }
 function response() {return {statusCode:200,body:null,status(n){this.statusCode=n;return this;},json(data){this.body=data;return this;}};}
-async function setup(t,fetcher) {
+async function setup(t,fetcher,sub={tier:3,perks:{unlimitedImageGeneration:true},trainingStepsLeft:{fixedTrainingStepsLeft:10000}}) {
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'naice-shot-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const user={directories:{root,userImages:path.join(root,'images')}};
   const req={user,body:{requestId:randomUUID(),chatKey:'chat-A',allowAnlas:true,options:{...DEFAULTS.options,seed:123},assembled:{base:'1boy',negative:'bad quality',characters:[{id:'leo',name:'Leo',prompt:'boy, brown hair',negative:'black hair',position:'auto',outfit:'shirt'}]},snapshot:{scene:{location:'cafe'}}}};
   let calls=0;const requests=[];
   const handlers=createHandlers({readKey:()=> 'test-secret-do-not-leak',fetcher:async(url,options)=>{
     requests.push({url,options});
-    if(url.endsWith('/subscription'))return new Response(JSON.stringify({tier:3,perks:{unlimitedImageGeneration:true},trainingStepsLeft:{fixedTrainingStepsLeft:10000}}));
+    if(url.endsWith('/subscription'))return new Response(JSON.stringify(sub));
     calls++;return fetcher?fetcher(url,options):new Response(archive(png));
   }});
   return {handlers,req,requests,calls:()=>calls,root};
@@ -40,7 +40,7 @@ test('server sends individual positive/negative slots, stores PNG and exact requ
   const again=response();await s.handlers.generate(s.req,again);assert.equal(again.body.id,res.body.id);assert.equal(s.calls(),1);
 });
 test('unknown V5 free eligibility is blocked on the server before image request',async t=>{
-  const s=await setup(t);s.req.body.allowAnlas=false;const res=response();await s.handlers.generate(s.req,res);assert.equal(res.statusCode,402);assert.equal(s.calls(),0);
+  const s=await setup(t);s.req.body.allowAnlas=false;const res=response();await s.handlers.generate(s.req,res);assert.equal(res.statusCode,428);assert.equal(res.body.code,'anlas-consent');assert.match(res.body.error,/무료 사용량에 따라 Anlas가 차감될 수 있어요\. Anlas 사용 허용이 꺼져 있어서 보내지 않았어요\./);assert.equal(s.calls(),0);
   s.req.body.allowAnlas=true;const next=response();await s.handlers.generate(s.req,next);assert.equal(next.statusCode,200);
 });
 test('concurrent rejection does not release another request’s lock; completion does release it',async t=>{
@@ -226,4 +226,30 @@ test('deleted work leaves a marker: nothing to read, old first saves refused, a 
  for(const name of await fs.readdir(path.join(s.root,'naice-shot-work'))){const f=JSON.parse(await fs.readFile(path.join(s.root,'naice-shot-work',name),'utf8'));assert.equal(f.work,null);assert.equal(f.deleted,true);}
  // A chat that never had work stays as it was: no marker, a first save works.
  assert.equal((await call('POST',{chatKey:'chat-new',expectedRevision:null,work})).statusCode,200);
+});
+test('Tablet and Scroll: blocked without consent, sent with it; the consent block is not an Anlas error',async t=>{
+ for(const tier of [1,2]){
+  const s=await setup(t,null,{tier,perks:{unlimitedImageGeneration:false},trainingStepsLeft:{fixedTrainingStepsLeft:1000,purchasedTrainingSteps:5}});
+  const v45={...s.req.body,requestId:randomUUID(),options:{...s.req.body.options,model:'nai-diffusion-4-5-full'},allowAnlas:false};
+  let res=response();await s.handlers.generate({...s.req,body:v45},res);assert.equal(res.statusCode,428);assert.equal(res.body.code,'anlas-consent');assert.match(res.body.error,/^이 생성은 Anlas를 사용해요\./);assert.equal(s.calls(),0);
+  res=response();await s.handlers.generate({...s.req,body:{...v45,allowAnlas:true}},res);assert.equal(res.statusCode,200);assert.equal(s.calls(),1);
+  const st=response();await s.handlers.status({user:s.req.user,query:{}},st);assert.deepEqual(st.body.subscription.anlas,{subscription:1000,purchased:5});
+ }
+});
+test('NovelAI failures are named only when the reply says why; the note is short and has no credentials',async t=>{
+ const cases=[[401,'{"statusCode":401,"message":"Unauthorized"}','nai-auth',/^NAI 키를 확인해 주세요/],
+  [402,'{"statusCode":402,"message":"Insufficient Anlas"}','nai-anlas',/^Anlas가 부족해요.*\(NovelAI 402: Insufficient Anlas\)$/],
+  [402,'{"message":"Payment required"}','nai-rejected',/^NovelAI가 요청을 거절했어요\. 계정 상태와 생성 설정을 확인해 주세요\..*\(NovelAI 402: Payment required\)$/],
+  [403,'{"message":"You do not have permission to use this model"}','nai-permission',/^이 모델의 사용 권한을 확인해 주세요/],
+  [403,'','nai-rejected',/\(NovelAI 403\)$/],
+  [403,'{"message":"Insufficient permissions"}','nai-permission',/^이 모델의 사용 권한을 확인해 주세요/],
+  [429,'{"message":"Too many requests"}','nai-busy',/잠시 후/],
+  [500,'<html>oops</html>','nai-down',/NovelAI 쪽에 문제/],
+  [400,'{"message":"Invalid size"}','nai-rejected',/\(NovelAI 400: Invalid size\)$/]];
+ for(const [status,body,code,re] of cases){const e=naiError(status,body);assert.equal(e.code,code,`${status} ${body}`);assert.match(e.message,re);assert.match(e.message,/자동 재요청하지 않았어요/);}
+ assert.equal(naiNote('{"message":"Bearer abc.def token pst-SECRET123 leaked"}'),'Bearer *** token *** leaked');
+ assert.equal(naiNote('x'.repeat(300)).length,120);assert.equal(naiNote('line1\nline2\u0007'),'line1 line2');
+ // Through the handler: the code and NovelAI's note reach the extension; the key never does.
+ const s=await setup(t,async()=>new Response('{"message":"Insufficient Anlas"}',{status:402}));
+ const res=response();await s.handlers.generate(s.req,res);assert.equal(res.statusCode,402);assert.equal(res.body.code,'nai-anlas');assert.doesNotMatch(JSON.stringify(res.body),/test-secret/);
 });
