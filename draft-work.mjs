@@ -40,7 +40,7 @@ export function unpackWork(data){
 // Each entry has a generation. Deleting the saved work starts a new generation, and replies to reads or
 // writes sent before it are ignored, so they can never bring back deleted work or an old revision.
 export class DraftQueue {
-  constructor({read,write,onState=()=>{},delay=650}){Object.assign(this,{read,write,onState,delay});this.entries=new Map();}
+  constructor({read,write,onState=()=>{},delay=650}){Object.assign(this,{read,write,onState,delay});this.entries=new Map();this.paused=false;}
   entry(key){
     let e=this.entries.get(key);if(!e)e={loaded:false,data:null,revision:null,dirty:false,version:0,error:null,gen:0};
     this.entries.delete(key);this.entries.set(key,e);
@@ -48,12 +48,19 @@ export class DraftQueue {
     for(const [oldKey,old] of this.entries){if(this.entries.size<=12)break;if(oldKey!==key&&old.loaded&&!old.dirty&&!old.saving&&!old.reading&&!old.pinned)this.entries.delete(oldKey);}
     return e;
   }
-  // Before deleting on the server: drop saves that have not left yet and wait for the ones in flight,
-  // so no older request can reach the server after the deletion. `keys` limits it to some chats.
-  async quiesce(keys=null){
+  // Before deleting on the server: hold every save (pending edits stay dirty and keep their data) and wait
+  // for requests already on their way, so no older request can reach the server after the deletion.
+  // If the deletion fails, resume() sends the held edits; if it succeeds, reset() drops them for deleted chats.
+  async pause(keys=null){
+    this.paused=true;
     const list=[...this.entries].filter(([key])=>!keys||keys.includes(key)).map(([,e])=>e);
-    for(const e of list){clearTimeout(e.timer);e.timer=null;e.dirty=false;}
+    for(const [,e] of this.entries){clearTimeout(e.timer);e.timer=null;}
     await Promise.all(list.flatMap(e=>[e.saving,e.reading]).filter(Boolean).map(p=>p.catch(()=>{})));
+  }
+  resume(){
+    this.paused=false;
+    // A snapshot: onState may touch entries, which reorders the Map while it is being walked.
+    for(const [key,e] of [...this.entries])if(e.loaded&&e.dirty&&!e.saving){clearTimeout(e.timer);e.timer=setTimeout(()=>this.flush(key),this.delay);this.onState(key,e);}
   }
   // After the server deleted a saved work: start a new generation and read again. The server leaves a
   // marker with a fresh revision, so the next save must be based on that read, never on an older one.
@@ -67,11 +74,11 @@ export class DraftQueue {
     e.reading=reading;return reading;
   }
   put(key,data){const e=this.entry(key);if(!e.loaded)return;const json=JSON.stringify(data);if(json===JSON.stringify(e.data))return;
-    e.data=JSON.parse(json);e.version++;e.dirty=true;e.error=null;clearTimeout(e.timer);e.timer=setTimeout(()=>this.flush(key),this.delay);this.onState(key,e);}
+    e.data=JSON.parse(json);e.version++;e.dirty=true;e.error=null;clearTimeout(e.timer);if(!this.paused)e.timer=setTimeout(()=>this.flush(key),this.delay);this.onState(key,e);}
   async flush(key){
-    const e=this.entry(key);clearTimeout(e.timer);if(e.saving)return e.saving;if(!e.loaded||!e.dirty)return;
+    const e=this.entry(key);clearTimeout(e.timer);if(e.saving)return e.saving;if(!e.loaded||!e.dirty||this.paused)return;
     const gen=e.gen;
-    const saving=(async()=>{while(e.dirty&&gen===e.gen){const version=e.version,work=e.data;
+    const saving=(async()=>{while(e.dirty&&gen===e.gen&&!this.paused){const version=e.version,work=e.data;
       try{const r=await this.write(key,{work,expectedRevision:e.revision});if(gen!==e.gen)return;e.revision=r.revision;e.error=null;if(version===e.version)e.dirty=false;}
       catch(error){if(gen===e.gen)e.error=error;break;}
     }})().finally(()=>{if(e.saving===saving)e.saving=null;this.onState(key,e);});
