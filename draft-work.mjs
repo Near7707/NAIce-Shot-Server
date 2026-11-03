@@ -55,10 +55,10 @@ export class DraftQueue {
     for(const e of list){clearTimeout(e.timer);e.timer=null;e.dirty=false;}
     await Promise.all(list.flatMap(e=>[e.saving,e.reading]).filter(Boolean).map(p=>p.catch(()=>{})));
   }
-  // After the server deleted a saved work: the next save starts a new file instead of reporting a conflict.
-  // `data` is what the screen now shows, so an unchanged screen is not saved straight back.
-  forget(key,data=null){const e=this.entry(key);clearTimeout(e.timer);e.gen++;
-    Object.assign(e,{loaded:true,data:data===null?null:JSON.parse(JSON.stringify(data)),revision:null,dirty:false,error:null,saving:null,reading:null});this.onState(key,e);}
+  // After the server deleted a saved work: start a new generation and read again. The server leaves a
+  // marker with a fresh revision, so the next save must be based on that read, never on an older one.
+  reset(key){const e=this.entry(key);clearTimeout(e.timer);e.gen++;
+    Object.assign(e,{loaded:false,data:null,revision:null,dirty:false,error:null,saving:null,reading:null});this.onState(key,e);}
   async ensure(key){
     const e=this.entry(key);if(e.loaded)return e.data;if(e.reading)return e.reading;
     const gen=e.gen;

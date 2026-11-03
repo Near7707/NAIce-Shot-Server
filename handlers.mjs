@@ -56,9 +56,9 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.10';
+const SERVER_VERSION='0.1.11';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
-const MIN_CLIENT_VERSION='0.1.0';
+const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
 const fail400=message=>new PublicError(message,400);
 const exists=async file=>{try{await fs.access(file);return true;}catch{return false;}};
@@ -68,6 +68,14 @@ async function moveFile(from,to){try{await fs.rename(from,to);}catch(e){if(e.cod
 const workFolder=dirs=>path.join(dirs.root,'naice-shot-work');
 const workFile=(dirs,chatKey)=>path.join(workFolder(dirs),createHash('sha256').update(chatKey).digest('hex')+'.json');
 const FREE_TEXT_LIMIT=4000;
+// Deleting saved work leaves a marker with a fresh revision and no content. A save prepared before the
+// deletion (in another window or device) still carries an older revision, so it is refused with 409
+// instead of quietly bringing the work back. Returns whether real work was removed.
+async function tombstone(file){
+  let old=null;try{old=JSON.parse(await fs.readFile(file,'utf8'));}catch(e){if(e.code==='ENOENT')return {had:false,revision:null};old={};}
+  const revision=randomUUID();await writeAtomic(file,JSON.stringify({revision,work:null,deleted:true}));
+  return {had:!!old?.work,revision};
+}
 const metaOf=item=>({id:item.id,created:String(item.created??''),chatKey:String(item.chatKey??''),seed:item.seed??null,model:item.options?.model??''});
 
 // Per-user storage. PNGs stay in the web-served user images folder (they are shown in chat).
@@ -127,22 +135,22 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
   };
   const fail=(res,e)=>res.status(e instanceof PublicError?e.status:500).json({error:e instanceof PublicError?e.message:'요청 처리 중 내부 오류가 발생했어요. 설치 경로와 파일 접근 권한을 확인해 주세요.'});
   const chatKeyOf=value=>{if(typeof value!=='string'||!value||value.length>1000)throw fail400('채팅 정보가 잘못됐어요.');return value;};
-  const features=['paged-history','delete','private-records','all-history','privacy-controls','draft-work','draft-delete','free-text'];
+  const features=['paged-history','delete','private-records','all-history','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone'];
   return {
     draft:async(req,res)=>{try{
       const {dirs,user}=context(req),body=req.body??{};
       // delete+all removes every saved work of this user (settings → 저장된 작업 모두 지우기).
       if(req.method==='POST'&&body.delete===true&&body.all===true){
         const count=await serial(user,async()=>{let names=[];try{names=await fs.readdir(workFolder(dirs));}catch(e){if(e.code!=='ENOENT')throw e;}
-          let n=0;for(const name of names)if(/^[0-9a-f]{64}\.json$/.test(name)&&await unlinkQuiet(path.join(workFolder(dirs),name)))n++;return n;});
+          let n=0;for(const name of names)if(/^[0-9a-f]{64}\.json$/.test(name)&&(await tombstone(path.join(workFolder(dirs),name))).had)n++;return n;});
         return res.json({deleted:count});
       }
       const chatKey=chatKeyOf(req.method==='POST'?body.chatKey:req.query?.chatKey);
       const folder=workFolder(dirs),file=workFile(dirs,chatKey);
       const value=await serial(user,async()=>{
-        if(req.method==='POST'&&body.delete===true){await unlinkQuiet(file);return {revision:null,deleted:true};}
+        if(req.method==='POST'&&body.delete===true){const t=await tombstone(file);return {revision:t.revision,deleted:t.had};}
         let old=null;try{old=JSON.parse(await fs.readFile(file,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
-        if(req.method!=='POST')return {revision:old?.revision??null,work:old?.work??null};
+        if(req.method!=='POST')return {revision:old?.revision??null,work:old?.deleted?null:old?.work??null};
         if(body.expectedRevision!==(old?.revision??null))throw new PublicError('다른 창이나 기기에서 작업이 바뀌었어요. 현재 작업은 화면에 유지했어요.',409);
         if(JSON.stringify(body).length>1100000)throw fail400('작업 내용이 너무 커요.');
         let work;try{work=packWork(body.work,{retainRaw:body.retainRawExtraction===true});}catch(e){throw fail400(e.message);}
@@ -186,7 +194,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         for(const id of wanted)skipped.push(id);
         if(deleted.length)await store.save(keep);
         // Deleting a chat's whole history also forgets that chat's saved drawing work.
-        const workDeleted=all?await unlinkQuiet(workFile(dirs,chatKey)):false;
+        const workDeleted=all?(await tombstone(workFile(dirs,chatKey))).had:false;
         return {deleted,skipped,workDeleted};
       });
       res.json(result);

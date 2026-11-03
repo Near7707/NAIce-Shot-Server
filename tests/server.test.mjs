@@ -204,17 +204,26 @@ test('프리샷 history keeps its situation text; other snapshots never gain one
  r=response();await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),chatKey:'{"free":true}',snapshot:{scene:{},mode:'free',freeText:'x'.repeat(4001)}}},r);
  assert.equal('freeText' in r.body.snapshot,false);
 });
-test('saved work can be deleted per chat, all at once, and with a chat\'s whole history',async t=>{
+test('deleted work leaves a marker: nothing to read, old first saves refused, a fresh revision accepted',async t=>{
  const s=await setup(t);const call=async(method,body={},query={})=>{const res=response();await s.handlers.draft({method,user:s.req.user,body,query},res);return res;};
- const work={scene:{characters:[],location:'cafe'}};
+ const work={scene:{characters:[],location:'cafe'}},get=async chatKey=>(await call('GET',{},{chatKey})).body;
  for(const chatKey of ['chat-A','chat-B','chat-C'])assert.equal((await call('POST',{chatKey,expectedRevision:null,work})).statusCode,200);
- let r=await call('POST',{chatKey:'chat-A',delete:true});assert.equal(r.body.deleted,true);
- assert.equal((await call('GET',{},{chatKey:'chat-A'})).body.work,null);
- assert.equal((await call('POST',{chatKey:'chat-A',expectedRevision:null,work})).statusCode,200,'a deleted work starts fresh');
+ // One chat.
+ let r=await call('POST',{chatKey:'chat-A',delete:true});assert.equal(r.body.deleted,true);assert.ok(r.body.revision);
+ let a=await get('chat-A');assert.equal(a.work,null);assert.equal(a.revision,r.body.revision);
+ assert.equal((await call('POST',{chatKey:'chat-A',expectedRevision:null,work})).statusCode,409,'a save prepared before the deletion (another window) is refused');
+ assert.equal((await call('POST',{chatKey:'chat-A',expectedRevision:a.revision,work})).statusCode,200,'after reading the marker, saving works again');
+ // A chat's whole history also deletes its work; single images keep it.
  const gen=response();await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),chatKey:'chat-B'}},gen);
- r=response();await s.handlers.delete({user:s.req.user,body:{chatKey:'chat-B',all:true}},r);assert.equal(r.body.workDeleted,true);
- assert.equal((await call('GET',{},{chatKey:'chat-B'})).body.work,null);
  r=response();await s.handlers.delete({user:s.req.user,body:{chatKey:'chat-C',ids:[gen.body.id]}},r);assert.equal(r.body.workDeleted,false,'deleting single images keeps the work');
- r=await call('POST',{delete:true,all:true});assert.equal(r.body.deleted,2);
- assert.deepEqual(await fs.readdir(path.join(s.root,'naice-shot-work')),[]);
+ r=response();await s.handlers.delete({user:s.req.user,body:{chatKey:'chat-B',all:true}},r);assert.equal(r.body.workDeleted,true);
+ assert.equal((await get('chat-B')).work,null);assert.equal((await call('POST',{chatKey:'chat-B',expectedRevision:null,work})).statusCode,409);
+ // Everything: counts only real work, and every marker gets a new revision.
+ const beforeC=(await get('chat-C')).revision;
+ r=await call('POST',{delete:true,all:true});assert.equal(r.body.deleted,2,'chat-A (saved again) and chat-C');
+ const c=await get('chat-C');assert.equal(c.work,null);assert.notEqual(c.revision,beforeC);
+ assert.equal((await call('POST',{chatKey:'chat-C',expectedRevision:beforeC,work})).statusCode,409,'an old revision cannot bring it back');
+ for(const name of await fs.readdir(path.join(s.root,'naice-shot-work'))){const f=JSON.parse(await fs.readFile(path.join(s.root,'naice-shot-work',name),'utf8'));assert.equal(f.work,null);assert.equal(f.deleted,true);}
+ // A chat that never had work stays as it was: no marker, a first save works.
+ assert.equal((await call('POST',{chatKey:'chat-new',expectedRevision:null,work})).statusCode,200);
 });

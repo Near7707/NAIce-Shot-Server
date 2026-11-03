@@ -58,8 +58,8 @@ Routes live under `/api/plugins/naice-shot/` and are scoped to the authenticated
 | `GET /status` | Version, feature flags and `minClient`. `?quick=1` skips the NovelAI subscription check. |
 | `GET /history` | Paged records for `chatKey`; `scope=all` lists every chat, with per-chat counts and total size. |
 | `POST /generate` | Calls NovelAI once per `requestId` (repeat IDs return the stored record), saves the PNG and record. |
-| `POST /delete` | Deletes chosen images of one chat, or `all:true` for that chat (also removes its saved work; reports `workDeleted`). |
-| `GET /draft`, `POST /draft` | One saved work per `chatKey`. POST needs `expectedRevision` and returns a new revision; a stale revision gets 409 and nothing is replaced. `delete:true` removes one work, `delete:true, all:true` removes all of the user's work. |
+| `POST /delete` | Deletes chosen images of one chat, or `all:true` for that chat (also deletes its saved work; reports `workDeleted`). |
+| `GET /draft`, `POST /draft` | One saved work per `chatKey`. POST needs `expectedRevision` and returns a new revision; a stale revision gets 409 and nothing is replaced. `delete:true` deletes one work, `delete:true, all:true` all of the user's work. Deleting leaves a content-free marker with a new revision, so saves prepared before the deletion are refused. |
 
 - Storage: PNGs in `<user>/user/images/naice-shot/`; records in `<user data root>/naice-shot-records/` and work in `<user data root>/naice-shot-work/` (SHA-256 file names), both outside the web-served folder. Saved work is replaced atomically.
 - The NovelAI key is read through SillyTavern's secrets module and never written to records or responses.

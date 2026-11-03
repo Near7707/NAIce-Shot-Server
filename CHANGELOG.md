@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.11 — 2026-11-03
+
+- **Deletion markers for saved work.** Deleting work (one chat, all work, or with a chat's whole history) now replaces the file with `{revision, work:null, deleted:true}` instead of removing it. GET returns no work and the marker's revision; a save prepared before the deletion (another window's first save with `expectedRevision:null`, or an older revision) gets 409 instead of recreating the work. Markers hold no prompts or descriptions.
+- Delete-all counts only files that still had work. Chats that never had work are unaffected.
+- Advertise `draft-tombstone`; `MIN_CLIENT_VERSION` is 0.1.44 (older extensions would hit a conflict after deleting).
+- Validation: 22 server Node tests passed; extension 0.1.44 has 135 Node tests and 34 Chromium scripts passing.
+
 ## 0.1.10 — 2026-11-03
 
 - **프리샷 history keeps its situation text.** A free-drawing request's snapshot now stores `mode:'free'` and `freeText` (up to 4000 characters), so the extension can bring the text back when restoring. Since 0.1.39 the extension sent the text but the server dropped it; older records cannot be repaired. Other snapshots never gain a `freeText`.
