@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.13 — 2026-11-03
+
+- `GET /history?scope=all&kind=chat` excludes the shared free-shot bucket **before** pagination, counts, chat summaries and storage totals. The response identifies `kind:'chat'`; the existing all-history query still includes every image. Advertise `history-kinds` for UI v0.1.47's four history scopes.
+- Generation, billing consent, saved work, deletion markers and record formats are unchanged. Older supported clients can still use existing history queries.
+- Validation: 25 server Node tests, including interleaved chat/free records, paging, counts, summaries and size. Cross-repository UI validation is recorded in the extension's `docs/REVIEW.md`.
+
 ## 0.1.12 — 2026-11-03
 
 - **NovelAI generation errors are named only when the reply says why:** `nai-auth` (401), `nai-anlas` (an Anlas/balance note), `nai-permission` (403 with a permission note), `nai-busy` (429), `nai-down` (5xx), otherwise `nai-rejected`. A status number alone never means "not enough Anlas". NovelAI's short note is appended (one line, ≤120 characters, tokens removed). Errors carry a `code` field.

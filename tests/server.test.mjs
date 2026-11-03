@@ -149,6 +149,21 @@ test('scope=all lists every chat with per-chat counts and total size, and can fi
   assert.equal((await hist(s,{scope:'all'})).total,3);
 });
 
+test('chat-only history filters free shots before pagination, counts, summaries and size',async t=>{
+  const s=await setup(t),free=JSON.stringify({free:true});
+  await gen(s);await gen(s,free);await gen(s,'chat-B');await gen(s,free);
+  const first=await hist(s,{scope:'all',kind:'chat',limit:'1'});
+  assert.equal(first.kind,'chat');assert.equal(first.total,2);assert.equal(first.imageCount,2);
+  assert.equal(first.bytes,png.length*2);assert.equal(first.hasMore,true);
+  assert.equal(first.chats.some(c=>c.chatKey===free),false);
+  const second=await hist(s,{scope:'all',kind:'chat',offset:'1',limit:'1'});
+  assert.equal(second.items.length,1);assert.notEqual(second.items[0].id,first.items[0].id);
+  assert.equal(second.hasMore,false);assert.notEqual(second.items[0].chatKey,free);
+  assert.equal((await hist(s,{scope:'all',kind:'chat',chatKey:free})).total,0);
+  assert.equal((await hist(s,{scope:'all'})).total,4);
+  assert.equal((await hist(s,{chatKey:free})).total,2);
+});
+
 
 test('server requires explicit raw-retention consent and strips reasoning in persisted records',async t=>{
   const s=await setup(t);

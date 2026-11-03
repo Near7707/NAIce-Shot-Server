@@ -56,7 +56,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.12';
+const SERVER_VERSION='0.1.13';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
@@ -152,7 +152,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
   };
   const fail=(res,e)=>res.status(e instanceof PublicError?e.status:500).json({error:e instanceof PublicError?e.message:'요청 처리 중 내부 오류가 발생했어요. 설치 경로와 파일 접근 권한을 확인해 주세요.',...(e instanceof PublicError&&e.code?{code:e.code}:{})});
   const chatKeyOf=value=>{if(typeof value!=='string'||!value||value.length>1000)throw fail400('채팅 정보가 잘못됐어요.');return value;};
-  const features=['paged-history','delete','private-records','all-history','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes'];
+  const features=['paged-history','delete','private-records','all-history','history-kinds','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes'];
   return {
     draft:async(req,res)=>{try{
       const {dirs,user}=context(req),body=req.body??{};
@@ -182,7 +182,9 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       const {user,store}=context(req),chatKey=String(req.query?.chatKey??''),all=req.query?.scope==='all';
       const offset=Math.max(0,Number.parseInt(req.query?.offset??'0',10)||0),limit=Math.min(100,Math.max(1,Number.parseInt(req.query?.limit??'20',10)||20));
       const page=await serial(user,async()=>{
-        const every=await store.ready();
+        const records=await store.ready();
+        // Filter before pagination and summaries; drawing mode never changes history scope.
+        const every=req.query?.kind==='chat'?records.filter(e=>e.chatKey!==JSON.stringify({free:true})):records;
         // scope=all lists every chat (optionally one chat via chatKey) so images of deleted or renamed chats can be cleaned up.
         const entries=every.filter(e=>all?(!chatKey||e.chatKey===chatKey):e.chatKey===chatKey).sort((a,b)=>b.created.localeCompare(a.created));
         const items=[];
@@ -193,7 +195,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         for(const e of every){const c=chats.get(e.chatKey)??{chatKey:e.chatKey,count:0,latest:''};c.count++;if(e.created>c.latest)c.latest=e.created;chats.set(e.chatKey,c);}
         let bytes=0;
         for(const e of every){try{bytes+=(await fs.stat(store.png(e.id))).size;}catch{}}
-        return {...page,scope:'all',chats:[...chats.values()].sort((a,b)=>b.latest.localeCompare(a.latest)),imageCount:every.length,bytes};
+        return {...page,scope:'all',kind:req.query?.kind==='chat'?'chat':'all',chats:[...chats.values()].sort((a,b)=>b.latest.localeCompare(a.latest)),imageCount:every.length,bytes};
       });
       res.json(page);
     }catch(e){fail(res,e);}},
