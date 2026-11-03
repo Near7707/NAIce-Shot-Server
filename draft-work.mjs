@@ -37,30 +37,45 @@ export function unpackWork(data){
 }
 
 // A per-key queue: changes during a save get their own following save; a failed save keeps its data.
+// Each entry has a generation. Deleting the saved work starts a new generation, and replies to reads or
+// writes sent before it are ignored, so they can never bring back deleted work or an old revision.
 export class DraftQueue {
   constructor({read,write,onState=()=>{},delay=650}){Object.assign(this,{read,write,onState,delay});this.entries=new Map();}
   entry(key){
-    let e=this.entries.get(key);if(!e)e={loaded:false,data:null,revision:null,dirty:false,version:0,error:null};
+    let e=this.entries.get(key);if(!e)e={loaded:false,data:null,revision:null,dirty:false,version:0,error:null,gen:0};
     this.entries.delete(key);this.entries.set(key,e);
     // Keep only a few clean chats in memory. Failed/unsaved/in-flight work is never evicted.
     for(const [oldKey,old] of this.entries){if(this.entries.size<=12)break;if(oldKey!==key&&old.loaded&&!old.dirty&&!old.saving&&!old.reading&&!old.pinned)this.entries.delete(oldKey);}
     return e;
   }
+  // Before deleting on the server: drop saves that have not left yet and wait for the ones in flight,
+  // so no older request can reach the server after the deletion. `keys` limits it to some chats.
+  async quiesce(keys=null){
+    const list=[...this.entries].filter(([key])=>!keys||keys.includes(key)).map(([,e])=>e);
+    for(const e of list){clearTimeout(e.timer);e.timer=null;e.dirty=false;}
+    await Promise.all(list.flatMap(e=>[e.saving,e.reading]).filter(Boolean).map(p=>p.catch(()=>{})));
+  }
   // After the server deleted a saved work: the next save starts a new file instead of reporting a conflict.
   // `data` is what the screen now shows, so an unchanged screen is not saved straight back.
-  forget(key,data=null){const e=this.entry(key);clearTimeout(e.timer);Object.assign(e,{loaded:true,data:data===null?null:JSON.parse(JSON.stringify(data)),revision:null,dirty:false,error:null});this.onState(key,e);}
+  forget(key,data=null){const e=this.entry(key);clearTimeout(e.timer);e.gen++;
+    Object.assign(e,{loaded:true,data:data===null?null:JSON.parse(JSON.stringify(data)),revision:null,dirty:false,error:null,saving:null,reading:null});this.onState(key,e);}
   async ensure(key){
     const e=this.entry(key);if(e.loaded)return e.data;if(e.reading)return e.reading;
-    e.reading=(async()=>{try{const r=await this.read(key);e.revision=r.revision??null;e.data=r.work??null;e.loaded=true;e.error=null;return e.data;}
-      catch(error){e.error=error;throw error;}finally{e.reading=null;this.onState(key,e);}})();return e.reading;
+    const gen=e.gen;
+    const reading=(async()=>{try{const r=await this.read(key);if(gen!==e.gen)return e.data;e.revision=r.revision??null;e.data=r.work??null;e.loaded=true;e.error=null;return e.data;}
+      catch(error){if(gen!==e.gen)return e.data;e.error=error;throw error;}finally{if(e.reading===reading)e.reading=null;this.onState(key,e);}})();
+    e.reading=reading;return reading;
   }
   put(key,data){const e=this.entry(key);if(!e.loaded)return;const json=JSON.stringify(data);if(json===JSON.stringify(e.data))return;
     e.data=JSON.parse(json);e.version++;e.dirty=true;e.error=null;clearTimeout(e.timer);e.timer=setTimeout(()=>this.flush(key),this.delay);this.onState(key,e);}
   async flush(key){
     const e=this.entry(key);clearTimeout(e.timer);if(e.saving)return e.saving;if(!e.loaded||!e.dirty)return;
-    e.saving=(async()=>{while(e.dirty){const version=e.version,work=e.data;
-      try{const r=await this.write(key,{work,expectedRevision:e.revision});e.revision=r.revision;e.error=null;if(version===e.version)e.dirty=false;}
-      catch(error){e.error=error;break;}
-    }})().finally(()=>{e.saving=null;this.onState(key,e);});this.onState(key,e);return e.saving;
+    const gen=e.gen;
+    const saving=(async()=>{while(e.dirty&&gen===e.gen){const version=e.version,work=e.data;
+      try{const r=await this.write(key,{work,expectedRevision:e.revision});if(gen!==e.gen)return;e.revision=r.revision;e.error=null;if(version===e.version)e.dirty=false;}
+      catch(error){if(gen===e.gen)e.error=error;break;}
+    }})().finally(()=>{if(e.saving===saving)e.saving=null;this.onState(key,e);});
+    e.saving=saving;this.onState(key,e);return saving;
   }
 }
+
