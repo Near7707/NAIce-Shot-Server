@@ -195,3 +195,26 @@ test('an interrupted draft replacement leaves the previous saved work intact',as
  finally{fs.rename=rename;}
  r=response();await s.handlers.draft({method:'GET',user:s.req.user,query:{chatKey:'chat-A'}},r);assert.equal(r.body.work.scene.location,'saved');assert.equal(r.body.revision,revision);assert.equal((await fs.readdir(path.join(s.root,'naice-shot-work'))).length,1,'failed replacement leaves no temporary copy');
 });
+test('프리샷 history keeps its situation text; other snapshots never gain one',async t=>{
+ const s=await setup(t);let r=response();
+ await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),chatKey:'{"free":true}',snapshot:{scene:{location:'park'},mode:'free',freeText:'Mira reads under a tree'}}},r);
+ assert.equal(r.body.snapshot.mode,'free');assert.equal(r.body.snapshot.freeText,'Mira reads under a tree');
+ r=response();await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),snapshot:{scene:{location:'cafe'},freeText:'not free mode'}}},r);
+ assert.equal('freeText' in r.body.snapshot,false);
+ r=response();await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),chatKey:'{"free":true}',snapshot:{scene:{},mode:'free',freeText:'x'.repeat(4001)}}},r);
+ assert.equal('freeText' in r.body.snapshot,false);
+});
+test('saved work can be deleted per chat, all at once, and with a chat\'s whole history',async t=>{
+ const s=await setup(t);const call=async(method,body={},query={})=>{const res=response();await s.handlers.draft({method,user:s.req.user,body,query},res);return res;};
+ const work={scene:{characters:[],location:'cafe'}};
+ for(const chatKey of ['chat-A','chat-B','chat-C'])assert.equal((await call('POST',{chatKey,expectedRevision:null,work})).statusCode,200);
+ let r=await call('POST',{chatKey:'chat-A',delete:true});assert.equal(r.body.deleted,true);
+ assert.equal((await call('GET',{},{chatKey:'chat-A'})).body.work,null);
+ assert.equal((await call('POST',{chatKey:'chat-A',expectedRevision:null,work})).statusCode,200,'a deleted work starts fresh');
+ const gen=response();await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),chatKey:'chat-B'}},gen);
+ r=response();await s.handlers.delete({user:s.req.user,body:{chatKey:'chat-B',all:true}},r);assert.equal(r.body.workDeleted,true);
+ assert.equal((await call('GET',{},{chatKey:'chat-B'})).body.work,null);
+ r=response();await s.handlers.delete({user:s.req.user,body:{chatKey:'chat-C',ids:[gen.body.id]}},r);assert.equal(r.body.workDeleted,false,'deleting single images keeps the work');
+ r=await call('POST',{delete:true,all:true});assert.equal(r.body.deleted,2);
+ assert.deepEqual(await fs.readdir(path.join(s.root,'naice-shot-work')),[]);
+});

@@ -46,6 +46,9 @@ export class DraftQueue {
     for(const [oldKey,old] of this.entries){if(this.entries.size<=12)break;if(oldKey!==key&&old.loaded&&!old.dirty&&!old.saving&&!old.reading&&!old.pinned)this.entries.delete(oldKey);}
     return e;
   }
+  // After the server deleted a saved work: the next save starts a new file instead of reporting a conflict.
+  // `data` is what the screen now shows, so an unchanged screen is not saved straight back.
+  forget(key,data=null){const e=this.entry(key);clearTimeout(e.timer);Object.assign(e,{loaded:true,data:data===null?null:JSON.parse(JSON.stringify(data)),revision:null,dirty:false,error:null});this.onState(key,e);}
   async ensure(key){
     const e=this.entry(key);if(e.loaded)return e.data;if(e.reading)return e.reading;
     e.reading=(async()=>{try{const r=await this.read(key);e.revision=r.revision??null;e.data=r.work??null;e.loaded=true;e.error=null;return e.data;}

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.10 — 2026-11-03
+
+- **프리샷 history keeps its situation text.** A free-drawing request's snapshot now stores `mode:'free'` and `freeText` (up to 4000 characters), so the extension can bring the text back when restoring. Since 0.1.39 the extension sent the text but the server dropped it; older records cannot be repaired. Other snapshots never gain a `freeText`.
+- **Saved work can be deleted.** `POST /draft` with `delete:true` removes one chat's work; with `delete:true, all:true` it removes every saved work of the signed-in user. `POST /delete` with `all:true` also removes that chat's work and reports `workDeleted`.
+- Advertise `draft-delete` and `free-text`. Extension 0.1.42 asks for this version.
+- Validation: 22 server Node tests passed; extension 0.1.42 has 134 Node tests and 34 Chromium scripts passing.
+
 ## 0.1.9 — 2026-11-03
 
 - Add authenticated per-user **GET /draft** and **POST /draft** for the extension's last work. Each chat (and the independent free-drawing bucket) has one private hashed file under `naice-shot-work/`.

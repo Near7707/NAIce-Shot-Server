@@ -56,7 +56,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.9';
+const SERVER_VERSION='0.1.10';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.0';
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
@@ -65,6 +65,9 @@ const exists=async file=>{try{await fs.access(file);return true;}catch{return fa
 async function unlinkQuiet(file){try{await fs.unlink(file);return true;}catch(e){if(e.code==='ENOENT')return false;throw e;}}
 async function writeAtomic(file,text){const tmp=`${file}.${process.pid}.${Date.now()}.tmp`;try{await fs.writeFile(tmp,text);await fs.rename(tmp,file);}finally{await unlinkQuiet(tmp);}}
 async function moveFile(from,to){try{await fs.rename(from,to);}catch(e){if(e.code!=='EXDEV')throw e;await fs.copyFile(from,to,fs.constants.COPYFILE_EXCL);await fs.unlink(from);}}
+const workFolder=dirs=>path.join(dirs.root,'naice-shot-work');
+const workFile=(dirs,chatKey)=>path.join(workFolder(dirs),createHash('sha256').update(chatKey).digest('hex')+'.json');
+const FREE_TEXT_LIMIT=4000;
 const metaOf=item=>({id:item.id,created:String(item.created??''),chatKey:String(item.chatKey??''),seed:item.seed??null,model:item.options?.model??''});
 
 // Per-user storage. PNGs stay in the web-served user images folder (they are shown in chat).
@@ -124,12 +127,20 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
   };
   const fail=(res,e)=>res.status(e instanceof PublicError?e.status:500).json({error:e instanceof PublicError?e.message:'요청 처리 중 내부 오류가 발생했어요. 설치 경로와 파일 접근 권한을 확인해 주세요.'});
   const chatKeyOf=value=>{if(typeof value!=='string'||!value||value.length>1000)throw fail400('채팅 정보가 잘못됐어요.');return value;};
-  const features=['paged-history','delete','private-records','all-history','privacy-controls','draft-work'];
+  const features=['paged-history','delete','private-records','all-history','privacy-controls','draft-work','draft-delete','free-text'];
   return {
     draft:async(req,res)=>{try{
-      const {dirs,user}=context(req),body=req.body??{},chatKey=chatKeyOf(req.method==='POST'?body.chatKey:req.query?.chatKey);
-      const folder=path.join(dirs.root,'naice-shot-work'),file=path.join(folder,createHash('sha256').update(chatKey).digest('hex')+'.json');
+      const {dirs,user}=context(req),body=req.body??{};
+      // delete+all removes every saved work of this user (settings → 저장된 작업 모두 지우기).
+      if(req.method==='POST'&&body.delete===true&&body.all===true){
+        const count=await serial(user,async()=>{let names=[];try{names=await fs.readdir(workFolder(dirs));}catch(e){if(e.code!=='ENOENT')throw e;}
+          let n=0;for(const name of names)if(/^[0-9a-f]{64}\.json$/.test(name)&&await unlinkQuiet(path.join(workFolder(dirs),name)))n++;return n;});
+        return res.json({deleted:count});
+      }
+      const chatKey=chatKeyOf(req.method==='POST'?body.chatKey:req.query?.chatKey);
+      const folder=workFolder(dirs),file=workFile(dirs,chatKey);
       const value=await serial(user,async()=>{
+        if(req.method==='POST'&&body.delete===true){await unlinkQuiet(file);return {revision:null,deleted:true};}
         let old=null;try{old=JSON.parse(await fs.readFile(file,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
         if(req.method!=='POST')return {revision:old?.revision??null,work:old?.work??null};
         if(body.expectedRevision!==(old?.revision??null))throw new PublicError('다른 창이나 기기에서 작업이 바뀌었어요. 현재 작업은 화면에 유지했어요.',409);
@@ -162,7 +173,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       res.json(page);
     }catch(e){fail(res,e);}},
     delete:async(req,res)=>{try{
-      const {user,store}=context(req),b=req.body??{},chatKey=chatKeyOf(b.chatKey),all=b.all===true;
+      const {user,store,dirs}=context(req),b=req.body??{},chatKey=chatKeyOf(b.chatKey),all=b.all===true;
       const ids=all?[]:b.ids;
       if(!all&&(!Array.isArray(ids)||!ids.length||ids.length>500||ids.some(id=>typeof id!=='string'||!ID.test(id))))throw fail400('삭제할 이미지 ID가 잘못됐어요.');
       const result=await serial(user,async()=>{
@@ -174,7 +185,9 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         }
         for(const id of wanted)skipped.push(id);
         if(deleted.length)await store.save(keep);
-        return {deleted,skipped};
+        // Deleting a chat's whole history also forgets that chat's saved drawing work.
+        const workDeleted=all?await unlinkQuiet(workFile(dirs,chatKey)):false;
+        return {deleted,skipped,workDeleted};
       });
       res.json(result);
     }catch(e){fail(res,e);}},
@@ -208,6 +221,8 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         const item={id:requestId,created:new Date().toISOString(),chatKey:b.chatKey,
           image:`/user/images/naice-shot/${requestId}.png`,seed:b.options.seed,options:b.options,assembled,
           snapshot:b.snapshot&&typeof b.snapshot==='object'?{scene:b.snapshot.scene??null,
+            // 프리샷 images keep their situation text so restoring from history brings it back.
+            ...(b.snapshot.mode==='free'?{mode:'free',...(typeof b.snapshot.freeText==='string'&&b.snapshot.freeText.length<=FREE_TEXT_LIMIT?{freeText:b.snapshot.freeText}:{})}:{}),
             ...(b.retainRawExtraction===true&&typeof b.snapshot.rawExtraction==='string'?{rawExtraction:stripReasoningBlocks(b.snapshot.rawExtraction)}:{})}:null,payload,version:SERVER_VERSION};
         await serial(user,async()=>{
           const entries=await ctx.store.ready();
