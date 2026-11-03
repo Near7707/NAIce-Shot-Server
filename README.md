@@ -37,3 +37,9 @@ Node 20+. Tests use mocked NovelAI responses and a temporary user folder.
 ## License
 
 GNU Affero General Public License v3.0 (see `LICENSE`).
+
+## Last drawing work (server 0.1.9)
+
+NAIce Shot 0.1.41 uses `GET /draft?chatKey=…` and `POST /draft` to remember editable work separately from image history and chat files. Files live in `<user data root>/naice-shot-work/` under SHA-256 filenames, outside web-served images. POST requires `expectedRevision` from GET and returns a new revision; stale revisions return 409 without replacing saved work. Raw extraction text is omitted unless the request explicitly opts in. Work can include prompts, direct-input character descriptions and one clear undo; include this private folder in your own server backups and do not share it unreviewed.
+
+Update the server and restart SillyTavern, then update/refresh the extension. Existing generation/history behavior remains supported for older extension versions.

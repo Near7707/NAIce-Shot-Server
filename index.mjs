@@ -6,6 +6,8 @@ export async function init(router) {
   const handlers=createHandlers({readKey:directories=>readSecret(directories,SECRET_KEYS.NOVEL)});
   router.get('/status',handlers.status);
   router.get('/history',handlers.history);
+  router.get('/draft',handlers.draft);
+  router.post('/draft',handlers.draft);
   router.post('/generate',handlers.generate);
   router.post('/delete',handlers.delete);
   console.info('[NAIce Shot] server ready');

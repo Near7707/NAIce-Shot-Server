@@ -74,7 +74,7 @@ test('server entry imports at the actual ST plugin depth and registers the docum
   const target=path.join(root,'plugins','naice-shot-server');await fs.cp(new URL('../',import.meta.url),target,{recursive:true,filter:src=>!/[\\/](\.git|tests|node_modules)([\\/]|$)/.test(path.relative(fileURLToPath(new URL('../',import.meta.url)),src)?'/'+path.relative(fileURLToPath(new URL('../',import.meta.url)),src):'')});
   const plugin=await import(pathToFileURL(path.join(target,'index.mjs')).href);const routes=[];
   await plugin.init({get:(route,handler)=>routes.push(['GET',route,handler]),post:(route,handler)=>routes.push(['POST',route,handler])});
-  assert.equal(plugin.info.id,'naice-shot');assert.deepEqual(routes.map(r=>r.slice(0,2)),[['GET','/status'],['GET','/history'],['POST','/generate'],['POST','/delete']]);
+  assert.equal(plugin.info.id,'naice-shot');assert.deepEqual(routes.map(r=>r.slice(0,2)),[['GET','/status'],['GET','/history'],['GET','/draft'],['POST','/draft'],['POST','/generate'],['POST','/delete']]);
 });
 
 const gen=async(s,chatKey='chat-A')=>{const res=response();await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),chatKey}},res);assert.equal(res.statusCode,200);return res.body;};
@@ -170,4 +170,28 @@ test('filesystem and unexpected provider errors never expose paths, keys or arbi
   const handlers=createHandlers({readKey:()=>{throw Object.assign(new Error('C:\\Users\\PrivateName secret-token'),{status:403});}});
   const unexpected=response();await handlers.status(s.req,unexpected);
   assert.equal(unexpected.statusCode,500);assert.doesNotMatch(JSON.stringify(unexpected.body),/PrivateName|secret-token/);
+});
+
+test('private draft endpoints isolate users/chats, compare revisions and strip raw unless explicitly allowed',async t=>{
+ const s=await setup(t);const call=async(method,body={},query={},user=s.req.user)=>{const res=response();await s.handlers.draft({method,user,body,query},res);return res;};
+ const work={scene:{characters:[],location:'cafe',source:{fingerprints:[{index:0,swipeId:0,text:'Example chat text'}]}},raw:'<think>internal</think>{"location":"cafe"}',undoClear:{scene:{characters:[]},raw:'undo text'}};
+ let r=await call('POST',{chatKey:'../../chat-A',expectedRevision:null,work});assert.equal(r.statusCode,200);const rev=r.body.revision;
+ r=await call('GET',{}, {chatKey:'../../chat-A'});assert.equal(r.body.work.raw,'');assert.equal(r.body.work.undoClear.raw,'');assert.doesNotMatch(JSON.stringify(r.body),/Example chat text/);
+ assert.ok(r.body.work.scene.source.fingerprints[0].signature);
+ assert.equal((await call('GET',{}, {chatKey:'chat-B'})).body.work,null);
+ const other={directories:{root:path.join(s.root,'other'),userImages:path.join(s.root,'other','images')}};
+ assert.equal((await call('GET',{}, {chatKey:'../../chat-A'},other)).body.work,null);
+ r=await call('POST',{chatKey:'../../chat-A',expectedRevision:null,work});assert.equal(r.statusCode,409);
+ r=await call('POST',{chatKey:'../../chat-A',expectedRevision:rev,work,retainRawExtraction:true});assert.equal(r.statusCode,200);
+ assert.equal((await call('GET',{}, {chatKey:'../../chat-A'})).body.work.raw,'{"location":"cafe"}');
+ assert.equal(s.calls(),0);assert.equal(await fs.readdir(path.join(s.root,'naice-shot-work')).then(x=>x.length),1);
+ assert.equal(await fs.access(path.join(s.root,'images')).then(()=>true,()=>false),false);
+});
+test('an interrupted draft replacement leaves the previous saved work intact',async t=>{
+ const s=await setup(t);const req={method:'POST',user:s.req.user,body:{chatKey:'chat-A',expectedRevision:null,work:{scene:{characters:[],location:'saved'}}}};
+ let r=response();await s.handlers.draft(req,r);const revision=r.body.revision;
+ const rename=fs.rename;fs.rename=async(from,to)=>{if(to.includes('naice-shot-work'))throw Error('private filesystem details');return rename(from,to);};
+ try{r=response();await s.handlers.draft({...req,body:{...req.body,expectedRevision:revision,work:{scene:{characters:[],location:'unsaved'}}}},r);assert.equal(r.statusCode,500);assert.doesNotMatch(JSON.stringify(r.body),/private filesystem/);}
+ finally{fs.rename=rename;}
+ r=response();await s.handlers.draft({method:'GET',user:s.req.user,query:{chatKey:'chat-A'}},r);assert.equal(r.body.work.scene.location,'saved');assert.equal(r.body.revision,revision);assert.equal((await fs.readdir(path.join(s.root,'naice-shot-work'))).length,1,'failed replacement leaves no temporary copy');
 });

@@ -1,7 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { inflateRawSync } from 'node:zlib';
+import {createHash, randomUUID} from 'node:crypto';
 import { buildPayload, costGuard, MODELS, stripReasoningBlocks } from './core.mjs';
+import {packWork} from './draft-work.mjs';
 
 class PublicError extends Error {
   constructor(message,status=400){super(message);this.status=status;}
@@ -54,14 +56,14 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.8';
+const SERVER_VERSION='0.1.9';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.0';
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
 const fail400=message=>new PublicError(message,400);
 const exists=async file=>{try{await fs.access(file);return true;}catch{return false;}};
 async function unlinkQuiet(file){try{await fs.unlink(file);return true;}catch(e){if(e.code==='ENOENT')return false;throw e;}}
-async function writeAtomic(file,text){const tmp=`${file}.${process.pid}.${Date.now()}.tmp`;await fs.writeFile(tmp,text);await fs.rename(tmp,file);}
+async function writeAtomic(file,text){const tmp=`${file}.${process.pid}.${Date.now()}.tmp`;try{await fs.writeFile(tmp,text);await fs.rename(tmp,file);}finally{await unlinkQuiet(tmp);}}
 async function moveFile(from,to){try{await fs.rename(from,to);}catch(e){if(e.code!=='EXDEV')throw e;await fs.copyFile(from,to,fs.constants.COPYFILE_EXCL);await fs.unlink(from);}}
 const metaOf=item=>({id:item.id,created:String(item.created??''),chatKey:String(item.chatKey??''),seed:item.seed??null,model:item.options?.model??''});
 
@@ -122,8 +124,20 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
   };
   const fail=(res,e)=>res.status(e instanceof PublicError?e.status:500).json({error:e instanceof PublicError?e.message:'요청 처리 중 내부 오류가 발생했어요. 설치 경로와 파일 접근 권한을 확인해 주세요.'});
   const chatKeyOf=value=>{if(typeof value!=='string'||!value||value.length>1000)throw fail400('채팅 정보가 잘못됐어요.');return value;};
-  const features=['paged-history','delete','private-records','all-history','privacy-controls'];
+  const features=['paged-history','delete','private-records','all-history','privacy-controls','draft-work'];
   return {
+    draft:async(req,res)=>{try{
+      const {dirs,user}=context(req),body=req.body??{},chatKey=chatKeyOf(req.method==='POST'?body.chatKey:req.query?.chatKey);
+      const folder=path.join(dirs.root,'naice-shot-work'),file=path.join(folder,createHash('sha256').update(chatKey).digest('hex')+'.json');
+      const value=await serial(user,async()=>{
+        let old=null;try{old=JSON.parse(await fs.readFile(file,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
+        if(req.method!=='POST')return {revision:old?.revision??null,work:old?.work??null};
+        if(body.expectedRevision!==(old?.revision??null))throw new PublicError('다른 창이나 기기에서 작업이 바뀌었어요. 현재 작업은 화면에 유지했어요.',409);
+        if(JSON.stringify(body).length>1100000)throw fail400('작업 내용이 너무 커요.');
+        let work;try{work=packWork(body.work,{retainRaw:body.retainRawExtraction===true});}catch(e){throw fail400(e.message);}
+        const next={revision:randomUUID(),work};await fs.mkdir(folder,{recursive:true});await writeAtomic(file,JSON.stringify(next));return {revision:next.revision};
+      });res.json(value);
+    }catch(e){fail(res,e);}},
     // quick=1: version check only, without calling NovelAI (used by the UI on panel open).
     status:async(req,res)=>{try{const {key}=context(req),secret=key();
       if(req.query?.quick==='1'||!secret)return res.json({keyConfigured:!!secret,version:SERVER_VERSION,features,minClient:MIN_CLIENT_VERSION});
