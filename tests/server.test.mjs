@@ -26,7 +26,13 @@ async function setup(t,fetcher,sub=OPUS) {
   let calls=0;const requests=[];
   const handlers=createHandlers({readKey:()=> 'test-secret-do-not-leak',fetcher:async(url,options)=>{
     requests.push({url,options});
-    if(url.endsWith('/subscription'))return sub==='fail'?new Response('down',{status:503}):new Response(JSON.stringify(sub));
+    if(url.endsWith('/subscription')){
+      if(sub==='fail')return new Response('down',{status:503});
+      if(sub==='offline')throw new TypeError('fetch failed');
+      if(sub==='timeout'){const e=new Error('The operation was aborted due to timeout');e.name='TimeoutError';throw e;}
+      if(sub==='garbled')return new Response('<html>oops');
+      if(sub==='nullbody')return new Response('null');
+      return new Response(JSON.stringify(sub));}
     calls++;return fetcher?fetcher(url,options):new Response(archive(png));
   }});
   return {handlers,req,requests,calls:()=>calls,root};
@@ -319,4 +325,16 @@ test('free check (0.1.16): the state comes first for every tier; a reply without
    [{tier:null,active:true,isGracePeriod:false},/^계정 정보에서 필요한 항목을 확인하지 못했어요/],[{tier:'3',active:true,isGracePeriod:false},/^계정 정보에서 필요한 항목을 확인하지 못했어요/]]){
   const s=await setup(t,null,sub);const res=response();await s.handlers.generate({...s.req,body:v45(s.req.body)},res);
   assert.equal(res.statusCode,428,JSON.stringify(sub));assert.match(res.body.error,pattern);assert.equal(s.calls(),0);}
+});
+test('account check failures (0.1.17): offline, timeout and an unreadable reply are nai-account too; nothing is sent and the timeout says so',async t=>{
+ const v45=body=>({...body,requestId:randomUUID(),options:{...body.options,model:'nai-diffusion-4-5-full'},allowAnlas:false});
+ for(const [kind,status,pattern] of [['fail',502,/^NAI 계정 확인 실패 \(503\)/],['offline',502,/연결하지 못했어요\). 생성 요청은 보내지 않았어요/],['timeout',504,/^NAI 계정 확인 시간이 초과됐어요\. 생성 요청은 보내지 않았어요\.$/],
+   ['garbled',502,/응답을 읽지 못했어요\). 생성 요청은 보내지 않았어요/],['nullbody',502,/응답을 읽지 못했어요/]]){
+  const s=await setup(t,null,kind);const res=response();await s.handlers.generate({...s.req,body:v45(s.req.body)},res);
+  assert.equal(res.statusCode,status,kind);assert.equal(res.body.code,'nai-account',kind);assert.match(res.body.error,pattern);assert.doesNotMatch(res.body.error,/실제 생성·차감/);assert.equal(s.calls(),0,kind);
+  const st=response();await s.handlers.status({user:s.req.user,query:{}},st);assert.equal(st.body.code,'nai-account',`status ${kind}`);
+ }
+ // With consent on, an unreadable account still lets the request go (the existing rule), and an image timeout keeps its own note.
+ const s=await setup(t,()=>{const e=new Error('timeout');e.name='TimeoutError';throw e;},OPUS);const res=response();
+ await s.handlers.generate({...s.req,body:{...v45(s.req.body),allowAnlas:true}},res);assert.equal(res.statusCode,504);assert.match(res.body.error,/실제 생성·차감 여부는 NAI에서 확인/);
 });

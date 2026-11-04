@@ -56,7 +56,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.16';
+const SERVER_VERSION='0.1.17';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
@@ -156,10 +156,20 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
   };
   const subscription=async(key,{shape=false}={})=>{
     if(!key)throw new PublicError('실리태번 API 연결 화면에 NAI 키를 먼저 저장해 주세요.',400);
-    const response=await fetcher(`${ORIGIN}/user/subscription`,{headers:{Authorization:`Bearer ${key}`},signal:AbortSignal.timeout(20000)});
-    // code nai-account (0.1.16): the UI drops its last free verdict and checks again (UI-067-01).
-    if(!response.ok)throw new PublicError(`NAI 계정 확인 실패 (${response.status}).`,response.status===401?401:502,'nai-account');
-    const data=JSON.parse((await readLimited(response,100000)).toString());
+    // code nai-account: the UI drops its last free verdict and checks again (UI-067-01). Every failure of this step
+    // carries it — an HTTP error, no connection, a timeout, a reply that cannot be read (0.1.17, UI-068-02). Nothing
+    // has been sent to the image API yet, so a timeout here says so.
+    let data;
+    try{
+      const response=await fetcher(`${ORIGIN}/user/subscription`,{headers:{Authorization:`Bearer ${key}`},signal:AbortSignal.timeout(20000)});
+      if(!response.ok)throw new PublicError(`NAI 계정 확인 실패 (${response.status}).`,response.status===401?401:502,'nai-account');
+      data=JSON.parse((await readLimited(response,100000)).toString());
+      if(!data||typeof data!=='object')throw new SyntaxError('not an object');
+    }catch(e){
+      if(e instanceof PublicError&&e.code==='nai-account')throw e;
+      if(e?.name==='TimeoutError'||e?.name==='AbortError')throw new PublicError('NAI 계정 확인 시간이 초과됐어요. 생성 요청은 보내지 않았어요.',504,'nai-account');
+      throw new PublicError(e instanceof SyntaxError?'NAI 계정 확인 실패 (응답을 읽지 못했어요). 생성 요청은 보내지 않았어요.':'NAI 계정 확인 실패 (연결하지 못했어요). 생성 요청은 보내지 않았어요.',502,'nai-account');
+    }
     // Forward only fields necessary for eligibility; never expose keys or full account data. A missing or odd field
     // stays null (never false or 0), so the shared costGuard can tell "not active" from "not known" (0.1.15).
     const bool=v=>typeof v==='boolean'?v:null;

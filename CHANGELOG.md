@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.17 — 2026-11-04
+
+- Every failure of the NovelAI account check — HTTP error, no connection, timeout, or a reply that cannot be read — answers with `code:'nai-account'` (502; 504 for a timeout), so the UI drops its old free verdict. A timeout at this step says "생성 요청은 보내지 않았어요"; the image-request timeout keeps its own note. Free check, consent and records are unchanged.
+- Validation: 30 server Node tests. Cross-repository UI validation is recorded in the extension's `docs/REVIEW.md`.
+
 ## 0.1.16 — 2026-11-04
 
 - Shared free check (same as UI v0.1.68): the subscription state (grace period, then inactive, then missing fields) comes first for every tier; a reply without a usable `tier` is "missing", never free.
