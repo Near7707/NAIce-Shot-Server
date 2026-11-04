@@ -224,8 +224,16 @@ test('프리샷 history keeps its situation text; other snapshots never gain one
  assert.equal(r.body.snapshot.mode,'free');assert.equal(r.body.snapshot.freeText,'Mira reads under a tree');
  r=response();await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),snapshot:{scene:{location:'cafe'},freeText:'not free mode'}}},r);
  assert.equal('freeText' in r.body.snapshot,false);
- r=response();await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),chatKey:'{"free":true}',snapshot:{scene:{},mode:'free',freeText:'x'.repeat(4001)}}},r);
- assert.equal('freeText' in r.body.snapshot,false);
+ const gen=async freeText=>{const res=response();const before=s.calls();await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),chatKey:'{"free":true}',snapshot:{scene:{},mode:'free',freeText}}},res);return {res,sent:s.calls()-before};};
+ // 0.1.18: too long is a clear error before NovelAI is called (no Anlas), never a silent drop.
+ let g=await gen('x'.repeat(4001));assert.equal(g.res.statusCode,400);assert.match(g.res.body.error,/상황 글이 너무 길어요/);assert.equal(g.sent,0);
+ g=await gen('x'.repeat(4000));assert.equal(g.res.statusCode,200);assert.equal(g.res.body.snapshot.freeText.length,4000);
+ // a chip counts as @name for the person, even though its stored form is long
+ const chip=`@[Leo](ref:${'a'.repeat(36)})`,withChips=chip.repeat(900)+'y'.repeat(100); // visible 900x4+100=3,700
+ assert.ok(withChips.length>4000);g=await gen(withChips);assert.equal(g.res.statusCode,200);assert.equal(g.res.body.snapshot.freeText,withChips);
+ g=await gen(chip.repeat(1100));assert.equal(g.res.statusCode,400);assert.equal(g.sent,0,'visible 4,400');
+ g=await gen('@[a](ref:x)'.repeat(20000));assert.equal(g.res.statusCode,400);assert.equal(g.sent,0,'over the stored ceiling');
+ g=await gen(12);assert.equal(g.res.statusCode,400);assert.equal(g.sent,0);
 });
 test('deleted work leaves a marker: nothing to read, old first saves refused, a fresh revision accepted',async t=>{
  const s=await setup(t);const call=async(method,body={},query={})=>{const res=response();await s.handlers.draft({method,user:s.req.user,body,query},res);return res;};
@@ -337,4 +345,12 @@ test('account check failures (0.1.17): offline, timeout and an unreadable reply 
  // With consent on, an unreadable account still lets the request go (the existing rule), and an image timeout keeps its own note.
  const s=await setup(t,()=>{const e=new Error('timeout');e.name='TimeoutError';throw e;},OPUS);const res=response();
  await s.handlers.generate({...s.req,body:{...v45(s.req.body),allowAnlas:true}},res);assert.equal(res.statusCode,504);assert.match(res.body.error,/실제 생성·차감 여부는 NAI에서 확인/);
+});
+
+test('saved work still fits the longest situation text and request the extension allows (0.1.18 ceilings)',async t=>{
+ const s=await setup(t);const call=async(method,body={},query={})=>{const res=response();await s.handlers.draft({method,user:s.req.user,body,query},res);return res;};
+ const free='@[a](ref:x)'.repeat(Math.floor(180000/11)),wish='@[a](ref:x)'.repeat(Math.floor(9000/11));
+ const work={scene:{characters:[],location:'cafe'},freeText:free,wish,undoClear:{scene:{characters:[],location:'old'},freeText:free,wish}};
+ const saved=await call('POST',{chatKey:'chat-L',work,expectedRevision:null});assert.equal(saved.statusCode,200,JSON.stringify(saved.body).slice(0,200));
+ const read=await call('GET',{},{chatKey:'chat-L'});assert.equal(read.body.work.freeText,free);assert.equal(read.body.work.undoClear.wish,wish);
 });

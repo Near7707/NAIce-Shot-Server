@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.18 — 2026-11-05
+
+- The 프리샷 situation text (`snapshot.freeText`) is checked on its own, before NovelAI is called: at most 4,000 characters a person sees (a `@[name](ref:ID)` chip counts as `@name`) and at most 180,000 stored. Over the limit the request is refused with a clear 400 and nothing is sent to NovelAI, instead of the text being dropped silently from the history record. The 250,000-character request limit now counts everything except that text. A non-text value is refused as well.
+- Saved work (200,000 per string, 1,000,000 total) is unchanged and still fits the longest allowed situation text and request (tested, including the undo copy).
+- Needs UI 0.1.77 or newer for the matching length rules; UI 0.1.77 needs this server.
+- Validation: 31 server Node tests.
+
 ## 0.1.17 — 2026-11-04
 
 - Every failure of the NovelAI account check — HTTP error, no connection, timeout, or a reply that cannot be read — answers with `code:'nai-account'` (502; 504 for a timeout), so the UI drops its old free verdict. A timeout at this step says "생성 요청은 보내지 않았어요"; the image-request timeout keeps its own note. Free check, consent and records are unchanged.

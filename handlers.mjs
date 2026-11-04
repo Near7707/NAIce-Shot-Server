@@ -56,7 +56,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.17';
+const SERVER_VERSION='0.1.18';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
@@ -67,7 +67,9 @@ async function writeAtomic(file,text){const tmp=`${file}.${process.pid}.${Date.n
 async function moveFile(from,to){try{await fs.rename(from,to);}catch(e){if(e.code!=='EXDEV')throw e;await fs.copyFile(from,to,fs.constants.COPYFILE_EXCL);await fs.unlink(from);}}
 const workFolder=dirs=>path.join(dirs.root,'naice-shot-work');
 const workFile=(dirs,chatKey)=>path.join(workFolder(dirs),createHash('sha256').update(chatKey).digest('hex')+'.json');
-const FREE_TEXT_LIMIT=4000;
+const FREE_TEXT_LIMIT=4000; // characters a person sees (a @profile chip counts as @name)
+const FREE_TEXT_STORED_LIMIT=180000; // the stored text form: a chip is @[name](ref:ID)
+const visibleLength=t=>t.replace(/@\[([^\]\n]{0,60})\]\(ref:[A-Za-z0-9_-]*\)/gu,(m,n)=>`@${n}`).length;
 // NovelAI's own short explanation, cleaned for display: one line, no credentials, at most 120 characters.
 export function naiNote(body){
   let text=String(body??'');try{const j=JSON.parse(text);text=typeof j==='string'?j:j?.message??j?.error??j?.detail??text;}catch{}
@@ -252,7 +254,14 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         const ctx=context(req);user=ctx.user;const b=req.body;
         if(!b || !ID.test(b.requestId) || typeof b.chatKey!=='string'||b.chatKey.length>1000)throw new PublicError('요청 ID 또는 채팅 정보가 잘못됐어요.',400);
         requestId=b.requestId;
-        if(JSON.stringify(b).length>250000)throw new PublicError('요청 크기가 너무 커요.',400);
+        // 0.1.18: the situation text is checked on its own, before NovelAI is called, and is never dropped silently.
+        const free=b.snapshot?.freeText;
+        if(free!==undefined&&free!==null){
+          if(typeof free!=='string')throw new PublicError('상황 글 형식이 잘못됐어요.',400);
+          if(free.length>FREE_TEXT_STORED_LIMIT||visibleLength(free)>FREE_TEXT_LIMIT)throw new PublicError(`상황 글이 너무 길어요. 화면에 보이는 글자 기준 ${FREE_TEXT_LIMIT.toLocaleString('en-US')}자까지예요.`,400);
+        }
+        const {freeText:_free,...restSnapshot}=b.snapshot&&typeof b.snapshot==='object'?b.snapshot:{};
+        if(JSON.stringify({...b,snapshot:b.snapshot&&typeof b.snapshot==='object'?restSnapshot:b.snapshot}).length>250000)throw new PublicError('요청 크기가 너무 커요.',400);
         await serial(user,()=>ctx.store.ready());
         const old=await ctx.store.readRecord(requestId);if(old)return res.json(old);
         if(active.has(user))throw new PublicError('이 계정에서 이미 생성 중이에요. 완료 후 다시 시도해 주세요.',409);
@@ -279,7 +288,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
           image:`/user/images/naice-shot/${requestId}.png`,seed:b.options.seed,options:b.options,assembled,
           snapshot:b.snapshot&&typeof b.snapshot==='object'?{scene:b.snapshot.scene??null,
             // 프리샷 images keep their situation text so restoring from history brings it back.
-            ...(b.snapshot.mode==='free'?{mode:'free',...(typeof b.snapshot.freeText==='string'&&b.snapshot.freeText.length<=FREE_TEXT_LIMIT?{freeText:b.snapshot.freeText}:{})}:{}),
+            ...(b.snapshot.mode==='free'?{mode:'free',...(typeof b.snapshot.freeText==='string'&&b.snapshot.freeText.length<=FREE_TEXT_STORED_LIMIT&&visibleLength(b.snapshot.freeText)<=FREE_TEXT_LIMIT?{freeText:b.snapshot.freeText}:{})}:{}),
             ...(b.retainRawExtraction===true&&typeof b.snapshot.rawExtraction==='string'?{rawExtraction:stripReasoningBlocks(b.snapshot.rawExtraction)}:{})}:null,payload,version:SERVER_VERSION};
         await serial(user,async()=>{
           const entries=await ctx.store.ready();
