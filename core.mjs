@@ -1,4 +1,4 @@
-export const VERSION = '0.1.14';
+export const VERSION = '0.1.15';
 export const BRAND = 'NAIce Shot';
 export const SIZE_PRESETS = {
   portrait:{label:'세로 · 832 × 1216',width:832,height:1216},
@@ -288,14 +288,35 @@ export function buildPayload(assembled,options) {
     v4_negative_prompt:{caption:{base_caption:assembled.negative,char_captions:captions(true)},use_coords:useCoords,use_order:false},
   }};
 }
-// What a generation may cost, worded for the account. kind: free | uses (Anlas is used) | may (Opus V5:
-// depends on the remaining free usage) | unknown (account not checked). Only `free` is sent without consent.
+// What a generation may cost, worded for the account (0.1.67; the same function decides on the server just before
+// sending). kind: free | uses (Anlas is used) | may (Opus V5: its own usage, Anlas when it runs out) | inactive
+// (subscription not active: not free) | unknown (not checked, or a needed field is missing: `missing`).
+// Only `free` is sent without consent. Rules (NovelAI docs, Nov 2026): older models such as V4.5 stay free for an
+// active Opus within the usual conditions (normal size, 28 steps or fewer, one image; text-to-image only, which is
+// all this extension sends); V5 has its own usage limit. Our own, conservative choices: a grace period is "unknown",
+// and a field that is missing or of the wrong kind is never read as false or 0. Only the fields the chosen model
+// needs are checked (V4.5 never needs `usage`). `perks.unlimitedImageGeneration` is no longer read: the account
+// reply checked on 2026-11-04 had no such field and the current schema does not declare it.
+const MISSING='계정 정보에서 필요한 항목을 확인하지 못했어요. 무료 생성 여부를 확인할 수 없어요.';
+export function usageOf(subscription){
+  const u=subscription?.usage,num=v=>typeof v==='number'&&Number.isFinite(v)?v:null;
+  if(!u||typeof u!=='object')return null;
+  return {percent:num(u.percent),purchasedPercent:num(u.purchasedPercent),isNegative:typeof u.isNegative==='boolean'?u.isNegative:null,timeUntilNextPercent:num(u.timeUntilNextPercent)};
+}
 export function costGuard(options,subscription) {
   const normal=options.width*options.height<=1048576 && options.steps<=28;
+  const v5=String(options.model??'').startsWith('nai-diffusion-5');
   if(!subscription||typeof subscription.tier!=='number')return {free:false,kind:'unknown',message:'비용 조건을 확인하지 못했어요.'};
   if(subscription.tier!==3)return {free:false,kind:'uses',message:'이 생성은 Anlas를 사용해요.'};
+  if(subscription.isGracePeriod===true)return {free:false,kind:'unknown',message:'구독 유예 기간이라 무료 생성 여부를 확인할 수 없어요.'};
+  if(subscription.active===false)return {free:false,kind:'inactive',message:'구독이 활성 상태가 아니라 무료 생성 대상이 아니에요.'};
+  if(typeof subscription.active!=='boolean'||typeof subscription.isGracePeriod!=='boolean')return {free:false,kind:'unknown',missing:true,message:MISSING};
   if(!normal)return {free:false,kind:'uses',message:'기본 무료 조건(기본 크기·28스텝 이하)을 넘어서 Anlas를 사용해요.'};
-  if(subscription.perks?.unlimitedImageGeneration!==true)return {free:false,kind:'unknown',message:'Opus 무료 생성 특전을 확인하지 못했어요. Anlas가 사용될 수 있어요.'};
-  if(options.model.startsWith('nai-diffusion-5'))return {free:false,kind:'may',message:'무료 사용량에 따라 Anlas가 차감될 수 있어요.'};
+  if(v5){
+    const u=usageOf(subscription);
+    if(!u||u.percent===null||u.isNegative===null)return {free:false,kind:'unknown',missing:true,message:MISSING};
+    if(u.isNegative)return {free:false,kind:'may',message:'V5 사용량을 지금 쓸 수 없어요. 생성하면 Anlas가 차감될 수 있어요.'};
+    return {free:false,kind:'may',message:'V5 사용량으로 생성해요. 부족하면 Anlas가 차감될 수 있어요.'};
+  }
   return {free:true,kind:'free',message:'Opus 무료 조건(기본 크기·28스텝 이하·1장)에 해당해요.'};
 }

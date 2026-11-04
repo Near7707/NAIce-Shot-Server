@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { inflateRawSync } from 'node:zlib';
 import {createHash, randomUUID} from 'node:crypto';
-import { buildPayload, costGuard, MODELS, stripReasoningBlocks } from './core.mjs';
+import { buildPayload, costGuard, usageOf, MODELS, stripReasoningBlocks } from './core.mjs';
 import {packWork} from './draft-work.mjs';
 
 class PublicError extends Error {
@@ -56,7 +56,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.14';
+const SERVER_VERSION='0.1.15';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
@@ -159,8 +159,11 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
     const response=await fetcher(`${ORIGIN}/user/subscription`,{headers:{Authorization:`Bearer ${key}`},signal:AbortSignal.timeout(20000)});
     if(!response.ok)throw new PublicError(`NAI 계정 확인 실패 (${response.status}).`,response.status===401?401:502);
     const data=JSON.parse((await readLimited(response,100000)).toString());
-    // Forward only fields necessary for eligibility; never expose keys or full account data.
-    return {tier:data.tier,perks:{unlimitedImageGeneration:data.perks?.unlimitedImageGeneration===true},
+    // Forward only fields necessary for eligibility; never expose keys or full account data. A missing or odd field
+    // stays null (never false or 0), so the shared costGuard can tell "not active" from "not known" (0.1.15).
+    const bool=v=>typeof v==='boolean'?v:null;
+    return {tier:typeof data.tier==='number'?data.tier:null,active:bool(data.active),isGracePeriod:bool(data.isGracePeriod),
+      perks:{unlimitedImageGeneration:bool(data.perks?.unlimitedImageGeneration)},usage:usageOf(data),
       anlas:{subscription:data.trainingStepsLeft?.fixedTrainingStepsLeft??null,purchased:data.trainingStepsLeft?.purchasedTrainingSteps??null},
       ...(shape?{shape:shapeOf(data)}:{})};
   };

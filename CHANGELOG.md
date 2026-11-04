@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.15 — 2026-11-04
+
+- **Free check fixed (shared `costGuard`, same as UI v0.1.67):** an active Opus V4.5 within the default size, 28 steps or fewer and one image is free and sent without Anlas consent. The old `perks.unlimitedImageGeneration` is no longer read (absent from the account reply checked on 2026-11-04 and from the current schema). Grace period → "can't tell" (cautious, checked first); `active:false` → not eligible; missing or odd fields → "can't tell", never false. V5 always needs consent.
+- `/status` and the generation check forward `active`, `isGracePeriod` and `usage` (`percent`, `purchasedPercent`, `isNegative`, `timeUntilNextPercent`) as they are; anything missing or of the wrong kind is `null`. Still no account data beyond these.
+- Validation: 28 server Node tests (every account case, consent on and off, failed check). Cross-repository UI validation is recorded in the extension's `docs/REVIEW.md`.
+
 ## 0.1.14 — 2026-11-04
 
 - `GET /status?shape=1` adds `subscription.shape`: the names and kinds of the fields in NovelAI's account reply (nested paths, the first item of arrays, up to 150 lines), **never their values**; names outside `[A-Za-z0-9_$-]{1,60}` show as "(이름 생략)". Without `shape=1` nothing changes. Advertised as `account-shape` (UI v0.1.66 shows it under [서버·NAI 연결 확인]).

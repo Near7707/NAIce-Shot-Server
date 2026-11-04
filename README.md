@@ -60,7 +60,7 @@ Routes live under `/api/plugins/naice-shot/` and are scoped to the authenticated
 
 | Route | Purpose |
 | --- | --- |
-| `GET /status` | Version, feature flags and `minClient`. `?quick=1` skips the NovelAI subscription check. `?shape=1` (0.1.14) adds the account reply's field names and kinds — never values. |
+| `GET /status` | Version, feature flags and `minClient`. `?quick=1` skips the NovelAI subscription check. The subscription part carries tier, active, grace period, V5 usage and Anlas only (0.1.15; missing values are `null`). `?shape=1` (0.1.14) adds the account reply's field names and kinds — never values. |
 | `GET /history` | Paged records for `chatKey`; `scope=all` lists every chat, with per-chat counts and total size. |
 | `POST /generate` | Calls NovelAI once per `requestId` (repeat IDs return the stored record), saves the PNG and record. Refuses with 428 `anlas-consent` when the request may cost Anlas and `allowAnlas` is off. NovelAI failures carry a `code` (`nai-auth`, `nai-anlas`, `nai-permission`, `nai-busy`, `nai-down`, `nai-rejected`) and NovelAI's short note. |
 | `POST /delete` | Deletes chosen images of one chat, or `all:true` for that chat (also deletes its saved work; reports `workDeleted`). |

@@ -17,14 +17,16 @@ function archive(data) {
   return Buffer.concat([local,name,packed,central,name,end]);
 }
 function response() {return {statusCode:200,body:null,status(n){this.statusCode=n;return this;},json(data){this.body=data;return this;}};}
-async function setup(t,fetcher,sub={tier:3,perks:{unlimitedImageGeneration:true},trainingStepsLeft:{fixedTrainingStepsLeft:10000}}) {
+// The account reply as NovelAI sent it on 2026-11-04: no image-generation perk, a `usage` block for V5.
+const OPUS={tier:3,active:true,isGracePeriod:false,perks:{contextTokens:8192},trainingStepsLeft:{fixedTrainingStepsLeft:10000,purchasedTrainingSteps:0},usage:{isNegative:false,percent:82,purchasedPercent:100,timeUntilNextPercent:600}};
+async function setup(t,fetcher,sub=OPUS) {
   const root=await fs.mkdtemp(path.join(os.tmpdir(),'naice-shot-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
   const user={directories:{root,userImages:path.join(root,'images')}};
   const req={user,body:{requestId:randomUUID(),chatKey:'chat-A',allowAnlas:true,options:{...DEFAULTS.options,seed:123},assembled:{base:'1boy',negative:'bad quality',characters:[{id:'leo',name:'Leo',prompt:'boy, brown hair',negative:'black hair',position:'auto',outfit:'shirt'}]},snapshot:{scene:{location:'cafe'}}}};
   let calls=0;const requests=[];
   const handlers=createHandlers({readKey:()=> 'test-secret-do-not-leak',fetcher:async(url,options)=>{
     requests.push({url,options});
-    if(url.endsWith('/subscription'))return new Response(JSON.stringify(sub));
+    if(url.endsWith('/subscription'))return sub==='fail'?new Response('down',{status:503}):new Response(JSON.stringify(sub));
     calls++;return fetcher?fetcher(url,options):new Response(archive(png));
   }});
   return {handlers,req,requests,calls:()=>calls,root};
@@ -40,7 +42,7 @@ test('server sends individual positive/negative slots, stores PNG and exact requ
   const again=response();await s.handlers.generate(s.req,again);assert.equal(again.body.id,res.body.id);assert.equal(s.calls(),1);
 });
 test('unknown V5 free eligibility is blocked on the server before image request',async t=>{
-  const s=await setup(t);s.req.body.allowAnlas=false;const res=response();await s.handlers.generate(s.req,res);assert.equal(res.statusCode,428);assert.equal(res.body.code,'anlas-consent');assert.match(res.body.error,/무료 사용량에 따라 Anlas가 차감될 수 있어요\. Anlas 사용 허용이 꺼져 있어서 보내지 않았어요\./);assert.equal(s.calls(),0);
+  const s=await setup(t);s.req.body.allowAnlas=false;const res=response();await s.handlers.generate(s.req,res);assert.equal(res.statusCode,428);assert.equal(res.body.code,'anlas-consent');assert.match(res.body.error,/V5 사용량으로 생성해요\. 부족하면 Anlas가 차감될 수 있어요\. Anlas 사용 허용이 꺼져 있어서 보내지 않았어요\./);assert.equal(s.calls(),0);
   s.req.body.allowAnlas=true;const next=response();await s.handlers.generate(s.req,next);assert.equal(next.statusCode,200);
 });
 test('concurrent rejection does not release another request’s lock; completion does release it',async t=>{
@@ -279,5 +281,35 @@ test('account shape: [NAI 연결 확인] gets field names and kinds only, never 
   'perks.unlimitedImageGenerationLimits[].resolution: number','trainingStepsLeft.purchasedTrainingSteps: number','paymentProcessorData.note: string','(이름 생략): number'])
   assert.ok(shape.includes(line),line);
  const text=JSON.stringify(shape);for(const v of ['value-must-not-leak','1893456000','4194304','8192','10000'])assert.ok(!text.includes(v),`no value ${v}`);
- assert.equal(res.body.version,'0.1.14');
+ assert.match(res.body.version,/^0\.1\.1[4-9]$/);
+});
+test('free check (0.1.15): an active Opus V4.5 without the old perk passes with consent off; every other account case is blocked before NovelAI',async t=>{
+ const v45=body=>({...body,requestId:randomUUID(),options:{...body.options,model:'nai-diffusion-4-5-full'},allowAnlas:false});
+ // The regression the user hit: no perks.unlimitedImageGeneration, active Opus, V4.5, consent off → sent.
+ {const s=await setup(t);const res=response();await s.handlers.generate({...s.req,body:v45(s.req.body)},res);assert.equal(res.statusCode,200);assert.equal(s.calls(),1);}
+ const blocked=async(sub,pattern,{v5=false}={})=>{const s=await setup(t,null,sub);const body=v5?{...s.req.body,requestId:randomUUID(),allowAnlas:false}:v45(s.req.body);
+  const res=response();await s.handlers.generate({...s.req,body},res);assert.equal(res.statusCode,428,JSON.stringify(sub));assert.equal(res.body.code,'anlas-consent');assert.match(res.body.error,pattern);assert.equal(s.calls(),0);
+  const ok=response();await s.handlers.generate({...s.req,body:{...body,requestId:randomUUID(),allowAnlas:true}},ok);assert.equal(ok.statusCode,200,'sent once consent is on');};
+ const {active:_a,...noActive}=OPUS;
+ await blocked(noActive,/^계정 정보에서 필요한 항목을 확인하지 못했어요/);
+ await blocked({...OPUS,active:'yes'},/^계정 정보에서 필요한 항목을 확인하지 못했어요/);
+ await blocked({...OPUS,active:false},/^구독이 활성 상태가 아니라 무료 생성 대상이 아니에요/);
+ await blocked({...OPUS,isGracePeriod:true},/^구독 유예 기간이라/);
+ await blocked({...OPUS,active:false,isGracePeriod:true},/^구독 유예 기간이라/);
+ await blocked({...OPUS,tier:2},/^이 생성은 Anlas를 사용해요/);
+ await blocked({...OPUS,tier:1},/^이 생성은 Anlas를 사용해요/);
+ await blocked(OPUS,/^V5 사용량으로 생성해요/,{v5:true});
+ await blocked({...OPUS,usage:{...OPUS.usage,isNegative:true,percent:0}},/^V5 사용량을 지금 쓸 수 없어요/,{v5:true});
+ const {usage:_u,...noUsage}=OPUS;await blocked(noUsage,/^계정 정보에서 필요한 항목을 확인하지 못했어요/,{v5:true});
+ // V4.5 never needs usage.
+ {const s=await setup(t,null,noUsage);const res=response();await s.handlers.generate({...s.req,body:v45(s.req.body)},res);assert.equal(res.statusCode,200);}
+ // A failed account check with consent off sends nothing.
+ {const s=await setup(t,null,'fail');const res=response();await s.handlers.generate({...s.req,body:v45(s.req.body)},res);assert.notEqual(res.statusCode,200);assert.equal(s.calls(),0);}
+});
+test('status (0.1.15): active, grace period and V5 usage are forwarded as they are; missing stays null, never false or 0',async t=>{
+ const s=await setup(t);let res=response();await s.handlers.status({user:s.req.user,query:{}},res);
+ assert.deepEqual({active:res.body.subscription.active,isGracePeriod:res.body.subscription.isGracePeriod,usage:res.body.subscription.usage},{active:true,isGracePeriod:false,usage:{percent:82,purchasedPercent:100,isNegative:false,timeUntilNextPercent:600}});
+ const odd=await setup(t,null,{tier:3,usage:{percent:'82',isNegative:1}});res=response();await odd.handlers.status({user:odd.req.user,query:{}},res);
+ assert.deepEqual([res.body.subscription.active,res.body.subscription.isGracePeriod,res.body.subscription.usage],[null,null,{percent:null,purchasedPercent:null,isNegative:null,timeUntilNextPercent:null}]);
+ assert.equal(res.body.subscription.perks.unlimitedImageGeneration,null);
 });
