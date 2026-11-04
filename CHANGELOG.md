@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.16 — 2026-11-04
+
+- Shared free check (same as UI v0.1.68): the subscription state (grace period, then inactive, then missing fields) comes first for every tier; a reply without a usable `tier` is "missing", never free.
+- A failed NovelAI account check answers with `code:'nai-account'` (still 502, or 401), so the UI drops its old verdict and checks again. Generation, consent and records are otherwise unchanged.
+- Validation: 29 server Node tests. Cross-repository UI validation is recorded in the extension's `docs/REVIEW.md`.
+
 ## 0.1.15 — 2026-11-04
 
 - **Free check fixed (shared `costGuard`, same as UI v0.1.67):** an active Opus V4.5 within the default size, 28 steps or fewer and one image is free and sent without Anlas consent. The old `perks.unlimitedImageGeneration` is no longer read (absent from the account reply checked on 2026-11-04 and from the current schema). Grace period → "can't tell" (cautious, checked first); `active:false` → not eligible; missing or odd fields → "can't tell", never false. V5 always needs consent.

@@ -1,4 +1,4 @@
-export const VERSION = '0.1.15';
+export const VERSION = '0.1.16';
 export const BRAND = 'NAIce Shot';
 export const SIZE_PRESETS = {
   portrait:{label:'세로 · 832 × 1216',width:832,height:1216},
@@ -306,11 +306,12 @@ export function usageOf(subscription){
 export function costGuard(options,subscription) {
   const normal=options.width*options.height<=1048576 && options.steps<=28;
   const v5=String(options.model??'').startsWith('nai-diffusion-5');
-  if(!subscription||typeof subscription.tier!=='number')return {free:false,kind:'unknown',message:'비용 조건을 확인하지 못했어요.'};
-  if(subscription.tier!==3)return {free:false,kind:'uses',message:'이 생성은 Anlas를 사용해요.'};
+  if(!subscription||typeof subscription!=='object')return {free:false,kind:'unknown',message:'비용 조건을 확인하지 못했어요.'}; // not checked yet
+  // 0.1.68 (UI-067-02/03): the subscription state comes first, for every tier; a reply without a usable tier is "missing".
   if(subscription.isGracePeriod===true)return {free:false,kind:'unknown',message:'구독 유예 기간이라 무료 생성 여부를 확인할 수 없어요.'};
   if(subscription.active===false)return {free:false,kind:'inactive',message:'구독이 활성 상태가 아니라 무료 생성 대상이 아니에요.'};
-  if(typeof subscription.active!=='boolean'||typeof subscription.isGracePeriod!=='boolean')return {free:false,kind:'unknown',missing:true,message:MISSING};
+  if(typeof subscription.tier!=='number'||typeof subscription.active!=='boolean'||typeof subscription.isGracePeriod!=='boolean')return {free:false,kind:'unknown',missing:true,message:MISSING};
+  if(subscription.tier!==3)return {free:false,kind:'uses',message:'이 생성은 Anlas를 사용해요.'};
   if(!normal)return {free:false,kind:'uses',message:'기본 무료 조건(기본 크기·28스텝 이하)을 넘어서 Anlas를 사용해요.'};
   if(v5){
     const u=usageOf(subscription);

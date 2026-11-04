@@ -56,7 +56,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.15';
+const SERVER_VERSION='0.1.16';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
@@ -157,7 +157,8 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
   const subscription=async(key,{shape=false}={})=>{
     if(!key)throw new PublicError('실리태번 API 연결 화면에 NAI 키를 먼저 저장해 주세요.',400);
     const response=await fetcher(`${ORIGIN}/user/subscription`,{headers:{Authorization:`Bearer ${key}`},signal:AbortSignal.timeout(20000)});
-    if(!response.ok)throw new PublicError(`NAI 계정 확인 실패 (${response.status}).`,response.status===401?401:502);
+    // code nai-account (0.1.16): the UI drops its last free verdict and checks again (UI-067-01).
+    if(!response.ok)throw new PublicError(`NAI 계정 확인 실패 (${response.status}).`,response.status===401?401:502,'nai-account');
     const data=JSON.parse((await readLimited(response,100000)).toString());
     // Forward only fields necessary for eligibility; never expose keys or full account data. A missing or odd field
     // stays null (never false or 0), so the shared costGuard can tell "not active" from "not known" (0.1.15).

@@ -246,7 +246,7 @@ test('deleted work leaves a marker: nothing to read, old first saves refused, a 
 });
 test('Tablet and Scroll: blocked without consent, sent with it; the consent block is not an Anlas error',async t=>{
  for(const tier of [1,2]){
-  const s=await setup(t,null,{tier,perks:{unlimitedImageGeneration:false},trainingStepsLeft:{fixedTrainingStepsLeft:1000,purchasedTrainingSteps:5}});
+  const s=await setup(t,null,{tier,active:true,isGracePeriod:false,perks:{unlimitedImageGeneration:false},trainingStepsLeft:{fixedTrainingStepsLeft:1000,purchasedTrainingSteps:5}});
   const v45={...s.req.body,requestId:randomUUID(),options:{...s.req.body.options,model:'nai-diffusion-4-5-full'},allowAnlas:false};
   let res=response();await s.handlers.generate({...s.req,body:v45},res);assert.equal(res.statusCode,428);assert.equal(res.body.code,'anlas-consent');assert.match(res.body.error,/^이 생성은 Anlas를 사용해요\./);assert.equal(s.calls(),0);
   res=response();await s.handlers.generate({...s.req,body:{...v45,allowAnlas:true}},res);assert.equal(res.statusCode,200);assert.equal(s.calls(),1);
@@ -304,7 +304,7 @@ test('free check (0.1.15): an active Opus V4.5 without the old perk passes with 
  // V4.5 never needs usage.
  {const s=await setup(t,null,noUsage);const res=response();await s.handlers.generate({...s.req,body:v45(s.req.body)},res);assert.equal(res.statusCode,200);}
  // A failed account check with consent off sends nothing.
- {const s=await setup(t,null,'fail');const res=response();await s.handlers.generate({...s.req,body:v45(s.req.body)},res);assert.notEqual(res.statusCode,200);assert.equal(s.calls(),0);}
+ {const s=await setup(t,null,'fail');const res=response();await s.handlers.generate({...s.req,body:v45(s.req.body)},res);assert.equal(res.statusCode,502);assert.equal(res.body.code,'nai-account','the UI can tell a failed account check');assert.equal(s.calls(),0);}
 });
 test('status (0.1.15): active, grace period and V5 usage are forwarded as they are; missing stays null, never false or 0',async t=>{
  const s=await setup(t);let res=response();await s.handlers.status({user:s.req.user,query:{}},res);
@@ -312,4 +312,11 @@ test('status (0.1.15): active, grace period and V5 usage are forwarded as they a
  const odd=await setup(t,null,{tier:3,usage:{percent:'82',isNegative:1}});res=response();await odd.handlers.status({user:odd.req.user,query:{}},res);
  assert.deepEqual([res.body.subscription.active,res.body.subscription.isGracePeriod,res.body.subscription.usage],[null,null,{percent:null,purchasedPercent:null,isNegative:null,timeUntilNextPercent:null}]);
  assert.equal(res.body.subscription.perks.unlimitedImageGeneration,null);
+});
+test('free check (0.1.16): the state comes first for every tier; a reply without a usable tier is "missing"',async t=>{
+ const v45=body=>({...body,requestId:randomUUID(),options:{...body.options,model:'nai-diffusion-4-5-full'},allowAnlas:false});
+ for(const [sub,pattern] of [[{tier:1,active:false,isGracePeriod:false},/^구독이 활성 상태가 아니라/],[{tier:2,active:false,isGracePeriod:true},/^구독 유예 기간이라/],
+   [{tier:null,active:true,isGracePeriod:false},/^계정 정보에서 필요한 항목을 확인하지 못했어요/],[{tier:'3',active:true,isGracePeriod:false},/^계정 정보에서 필요한 항목을 확인하지 못했어요/]]){
+  const s=await setup(t,null,sub);const res=response();await s.handlers.generate({...s.req,body:v45(s.req.body)},res);
+  assert.equal(res.statusCode,428,JSON.stringify(sub));assert.match(res.body.error,pattern);assert.equal(s.calls(),0);}
 });
