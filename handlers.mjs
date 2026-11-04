@@ -56,7 +56,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.13';
+const SERVER_VERSION='0.1.14';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
@@ -141,18 +141,32 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
     if(!dirs?.userImages || !dirs?.root)throw new PublicError('실리태번 사용자 경로를 찾지 못했어요.',401);
     return {dirs,user:dirs.root,store:createStore(dirs),key:()=>readKey(dirs)};
   };
-  const subscription=async key=>{
+  // [NAI 연결 확인] → the account reply's field NAMES and kinds only, never a value (0.1.14). Used to check which
+  // fields NovelAI really sends before the free/usage rules depend on them.
+  const shapeOf=data=>{
+    const out=[],kind=v=>v===null?'null':Array.isArray(v)?'array':typeof v,safe=k=>/^[A-Za-z0-9_$-]{1,60}$/.test(k)?k:'(이름 생략)';
+    const walk=(v,path,depth)=>{
+      if(out.length>=150)return;const k=kind(v);
+      if(path)out.push(k==='array'?`${path}: array (${v.length}개)`:`${path}: ${k}`);
+      if(depth>=4)return;
+      if(k==='array'){if(v.length&&kind(v[0])==='object')walk(v[0],`${path}[]`,depth+1);return;}
+      if(k==='object')for(const key of Object.keys(v).sort())walk(v[key],path?`${path}.${safe(key)}`:safe(key),depth+1);
+    };
+    walk(data,'',0);if(out.length>=150)out.push('… (150개까지만 보여요)');return out;
+  };
+  const subscription=async(key,{shape=false}={})=>{
     if(!key)throw new PublicError('실리태번 API 연결 화면에 NAI 키를 먼저 저장해 주세요.',400);
     const response=await fetcher(`${ORIGIN}/user/subscription`,{headers:{Authorization:`Bearer ${key}`},signal:AbortSignal.timeout(20000)});
     if(!response.ok)throw new PublicError(`NAI 계정 확인 실패 (${response.status}).`,response.status===401?401:502);
     const data=JSON.parse((await readLimited(response,100000)).toString());
     // Forward only fields necessary for eligibility; never expose keys or full account data.
     return {tier:data.tier,perks:{unlimitedImageGeneration:data.perks?.unlimitedImageGeneration===true},
-      anlas:{subscription:data.trainingStepsLeft?.fixedTrainingStepsLeft??null,purchased:data.trainingStepsLeft?.purchasedTrainingSteps??null}};
+      anlas:{subscription:data.trainingStepsLeft?.fixedTrainingStepsLeft??null,purchased:data.trainingStepsLeft?.purchasedTrainingSteps??null},
+      ...(shape?{shape:shapeOf(data)}:{})};
   };
   const fail=(res,e)=>res.status(e instanceof PublicError?e.status:500).json({error:e instanceof PublicError?e.message:'요청 처리 중 내부 오류가 발생했어요. 설치 경로와 파일 접근 권한을 확인해 주세요.',...(e instanceof PublicError&&e.code?{code:e.code}:{})});
   const chatKeyOf=value=>{if(typeof value!=='string'||!value||value.length>1000)throw fail400('채팅 정보가 잘못됐어요.');return value;};
-  const features=['paged-history','delete','private-records','all-history','history-kinds','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes'];
+  const features=['paged-history','delete','private-records','all-history','history-kinds','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes','account-shape'];
   return {
     draft:async(req,res)=>{try{
       const {dirs,user}=context(req),body=req.body??{};
@@ -177,7 +191,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
     // quick=1: version check only, without calling NovelAI (used by the UI on panel open).
     status:async(req,res)=>{try{const {key}=context(req),secret=key();
       if(req.query?.quick==='1'||!secret)return res.json({keyConfigured:!!secret,version:SERVER_VERSION,features,minClient:MIN_CLIENT_VERSION});
-      res.json({keyConfigured:true,version:SERVER_VERSION,features,minClient:MIN_CLIENT_VERSION,subscription:await subscription(secret)});}catch(e){fail(res,e);}},
+      res.json({keyConfigured:true,version:SERVER_VERSION,features,minClient:MIN_CLIENT_VERSION,subscription:await subscription(secret,{shape:req.query?.shape==='1'})});}catch(e){fail(res,e);}},
     history:async(req,res)=>{try{
       const {user,store}=context(req),chatKey=String(req.query?.chatKey??''),all=req.query?.scope==='all';
       const offset=Math.max(0,Number.parseInt(req.query?.offset??'0',10)||0),limit=Math.min(100,Math.max(1,Number.parseInt(req.query?.limit??'20',10)||20));

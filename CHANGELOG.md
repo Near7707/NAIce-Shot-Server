@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.14 — 2026-11-04
+
+- `GET /status?shape=1` adds `subscription.shape`: the names and kinds of the fields in NovelAI's account reply (nested paths, the first item of arrays, up to 150 lines), **never their values**; names outside `[A-Za-z0-9_$-]{1,60}` show as "(이름 생략)". Without `shape=1` nothing changes. Advertised as `account-shape` (UI v0.1.66 shows it under [서버·NAI 연결 확인]).
+- Generation, the free check, billing consent, history and saved work are unchanged.
+- Validation: 26 server Node tests (new: names without values, only when asked). Cross-repository UI validation is recorded in the extension's `docs/REVIEW.md`.
+
 ## 0.1.13 — 2026-11-03
 
 - `GET /history?scope=all&kind=chat` excludes the shared free-shot bucket **before** pagination, counts, chat summaries and storage totals. The response identifies `kind:'chat'`; the existing all-history query still includes every image. Advertise `history-kinds` for UI v0.1.47's four history scopes.

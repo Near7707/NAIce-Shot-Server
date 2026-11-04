@@ -268,3 +268,16 @@ test('NovelAI failures are named only when the reply says why; the note is short
  const s=await setup(t,async()=>new Response('{"message":"Insufficient Anlas"}',{status:402}));
  const res=response();await s.handlers.generate(s.req,res);assert.equal(res.statusCode,402);assert.equal(res.body.code,'nai-anlas');assert.doesNotMatch(JSON.stringify(res.body),/test-secret/);
 });
+test('account shape: [NAI 연결 확인] gets field names and kinds only, never values, and only when asked',async t=>{
+ const sub={tier:3,active:true,expiresAt:1893456000,perks:{unlimitedImageGeneration:true,unlimitedImageGenerationLimits:[{resolution:4194304,maxPrompts:0}],contextTokens:8192},
+  trainingStepsLeft:{fixedTrainingStepsLeft:10000,purchasedTrainingSteps:0},paymentProcessorData:{note:'value-must-not-leak'},'odd key!':1};
+ const s=await setup(t,null,sub);
+ const plain=response();await s.handlers.status({user:s.req.user,query:{}},plain);assert.equal('shape' in plain.body.subscription,false,'not sent unless asked');
+ const res=response();await s.handlers.status({user:s.req.user,query:{shape:'1'}},res);const shape=res.body.subscription.shape;
+ assert.ok(res.body.features.includes('account-shape'));
+ for(const line of ['tier: number','active: boolean','perks.unlimitedImageGeneration: boolean','perks.unlimitedImageGenerationLimits: array (1개)',
+  'perks.unlimitedImageGenerationLimits[].resolution: number','trainingStepsLeft.purchasedTrainingSteps: number','paymentProcessorData.note: string','(이름 생략): number'])
+  assert.ok(shape.includes(line),line);
+ const text=JSON.stringify(shape);for(const v of ['value-must-not-leak','1893456000','4194304','8192','10000'])assert.ok(!text.includes(v),`no value ${v}`);
+ assert.equal(res.body.version,'0.1.14');
+});
