@@ -12,5 +12,6 @@ export async function init(router) {
   router.get('/generation',handlers.generation);
   router.post('/generation',handlers.generation);
   router.post('/delete',handlers.delete);
+  router.post('/delete-check',handlers.deleteCheck);
   console.info('[NAIce Shot] server ready');
 }

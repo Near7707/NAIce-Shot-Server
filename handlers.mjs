@@ -56,7 +56,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.20';
+const SERVER_VERSION='0.1.21';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
@@ -189,6 +189,34 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
     try{return JSON.parse(await fs.readFile(requestFile(dirs,id),'utf8'));}
     catch(e){if(e.code==='ENOENT')return null;throw e;}
   }
+  async function pendingRequests(ctx,{includeUncertain=false}={}){
+    const {dirs,user,store}=ctx,volatile=unsaved.get(user);
+    let names=[];
+    try{names=await fs.readdir(requestFolder(dirs));}catch(e){if(e.code!=='ENOENT')throw e;}
+    const ids=new Set(names.filter(name=>name.endsWith('.json')&&validId(name.slice(0,-5))).map(name=>name.slice(0,-5)));
+    if(volatile)ids.add(volatile.item.id);
+    const pending=[];
+    for(const id of ids){
+      const memory=volatile?.item.id===id,request=memory?volatile:await readRequest(dirs,id).catch(e=>{
+        if(e instanceof SyntaxError)return null;throw e;
+      });
+      if(request?.state==='received'&&request.item?.id===id&&typeof request.item.chatKey==='string'){
+        if(await store.readRecord(id)&&await exists(store.png(id)))continue;
+        const bytes=memory?request.png.length:(await fs.stat(requestFile(dirs,id))).size;
+        const pngBytes=await fs.stat(store.png(id)).then(x=>x.size,e=>{if(e.code==='ENOENT')return 0;throw e;});
+        pending.push({id,chatKey:request.item.chatKey,created:request.item.created,bytes:bytes+pngBytes});
+      }else if(includeUncertain&&['submitted','rejected'].includes(request?.state)&&typeof request.chatKey==='string'){
+        pending.push({id,chatKey:request.chatKey,bytes:0});
+      }
+    }
+    return pending;
+  }
+  async function readDraftState(dirs,key){
+    try{
+      const value=JSON.parse(await fs.readFile(workFile(dirs,key),'utf8'));
+      return {revision:value?.revision??null,work:value?.deleted?null:value?.work??null,deleted:value?.deleted===true};
+    }catch(e){if(e.code==='ENOENT')return {revision:null,work:null,deleted:false};throw e;}
+  }
   async function finishGeneration(ctx,item,png){
     const {store,dirs}=ctx,id=item.id;
     const entries=await store.ready();
@@ -199,13 +227,14 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
     await unlinkQuiet(requestFile(dirs,id)).catch(()=>{});
   }
   async function generationState(ctx,id,{recover=false}={}){
-    if(active.get(ctx.user)===id)return {state:'processing'};
+    if(active.get(ctx.user)?.id===id)return {state:'processing'};
     return serial(ctx.user,async()=>{
-      if(active.get(ctx.user)===id)return {state:'processing'};
+      if(active.get(ctx.user)?.id===id)return {state:'processing'};
       const item=await ctx.store.readRecord(id);
       if(item&&await exists(ctx.store.png(id)))return {state:'complete',item};
       const volatile=unsaved.get(ctx.user);
       const pending=volatile?.item.id===id?volatile:await readRequest(ctx.dirs,id);
+      if(['rejected','discarded'].includes(pending?.state))return {state:pending.state};
       if(pending?.state!=='received')return {state:pending||item?'unknown':'missing'};
       if(!recover)return {state:'save-failed'};
       try{
@@ -215,12 +244,34 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       }catch{return {state:'save-failed'};}
     });
   }
-  const features=['paged-history','delete','private-records','all-history','history-kinds','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes','account-shape','generation-recovery'];
+  const features=['paged-history','delete','private-records','all-history','history-kinds','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes','account-shape','generation-recovery','pending-history','delete-check'];
   return {
     generation:async(req,res)=>{try{
       const ctx=context(req),recover=req.method==='POST',id=recover?req.body?.requestId:req.query?.requestId;
+      if(!recover&&req.query?.chatKey!==undefined){
+        const key=chatKeyOf(req.query.chatKey);
+        return res.json(await serial(ctx.user,async()=>({pending:(await pendingRequests(ctx)).filter(entry=>entry.chatKey===key)})));
+      }
       if(!validId(id))throw fail400('요청 ID가 잘못됐어요.');
       res.json(await generationState(ctx,id,{recover}));
+    }catch(e){fail(res,e);}},
+    deleteCheck:async(req,res)=>{try{
+      const ctx=context(req),{dirs,user,store}=ctx,b=req.body??{},chatKey=chatKeyOf(b.chatKey),ids=b.ids??[];
+      if(!Array.isArray(ids)||ids.length>500||ids.some(id=>!validId(id)))throw fail400('확인할 이미지 ID가 잘못됐어요.');
+      const result=await serial(user,async()=>{
+        const entries=await store.ready(),pending=await pendingRequests(ctx);
+        const present=new Set([...entries,...pending].map(entry=>entry.id)),absent=[];
+        for(const id of new Set(ids)){
+          if(present.has(id)||active.get(user)?.id===id)continue;
+          const files=[store.png(id),store.record(id)];
+          const missing=await Promise.all(files.map(file=>fs.stat(file).then(()=>false,e=>{if(e.code==='ENOENT')return true;throw e;})));
+          if(missing.every(Boolean))absent.push(id);
+        }
+        const draft=b.all===true?await readDraftState(dirs,chatKey):null;
+        const remaining=[...entries,...pending].some(entry=>entry.chatKey===chatKey)||active.get(user)?.chatKey===chatKey;
+        return {absent,remaining,...(draft?{draftDeleted:draft.deleted,draftRevision:draft.revision}:{})};
+      });
+      res.json(result);
     }catch(e){fail(res,e);}},
     draft:async(req,res)=>{try{
       const {dirs,user}=context(req),body=req.body??{};
@@ -235,7 +286,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       const value=await serial(user,async()=>{
         if(req.method==='POST'&&body.delete===true){const t=await tombstone(file);return {revision:t.revision,deleted:t.had};}
         let old=null;try{old=JSON.parse(await fs.readFile(file,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
-        if(req.method!=='POST')return {revision:old?.revision??null,work:old?.deleted?null:old?.work??null};
+        if(req.method!=='POST')return {revision:old?.revision??null,work:old?.deleted?null:old?.work??null,...(old?.deleted?{deleted:true}:{})};
         if(body.expectedRevision!==(old?.revision??null))throw new PublicError('다른 창이나 기기에서 작업이 바뀌었어요. 현재 작업은 화면에 유지했어요.',409);
         if(JSON.stringify(body).length>1100000)throw fail400('작업 내용이 너무 커요.');
         let work;try{work=packWork(body.work,{retainRaw:body.retainRawExtraction===true});}catch(e){throw fail400(e.message);}
@@ -247,7 +298,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       if(req.query?.quick==='1'||!secret)return res.json({keyConfigured:!!secret,version:SERVER_VERSION,features,minClient:MIN_CLIENT_VERSION});
       res.json({keyConfigured:true,version:SERVER_VERSION,features,minClient:MIN_CLIENT_VERSION,subscription:await subscription(secret,{shape:req.query?.shape==='1'})});}catch(e){fail(res,e);}},
     history:async(req,res)=>{try{
-      const {user,store}=context(req),chatKey=String(req.query?.chatKey??''),all=req.query?.scope==='all';
+      const ctx=context(req),{user,store}=ctx,chatKey=String(req.query?.chatKey??''),all=req.query?.scope==='all';
       const offset=Math.max(0,Number.parseInt(req.query?.offset??'0',10)||0),limit=Math.min(100,Math.max(1,Number.parseInt(req.query?.limit??'20',10)||20));
       const page=await serial(user,async()=>{
         const records=await store.ready();
@@ -257,32 +308,51 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         const entries=every.filter(e=>all?(!chatKey||e.chatKey===chatKey):e.chatKey===chatKey).sort((a,b)=>b.created.localeCompare(a.created));
         const items=[];
         for(const entry of entries.slice(offset,offset+limit)){const item=await store.readRecord(entry.id);if(item)items.push(item);}
-        const page={items,total:entries.length,offset,limit,hasMore:offset+limit<entries.length};
+        const pending=(await pendingRequests(ctx)).filter(e=>req.query?.kind!=='chat'||e.chatKey!==JSON.stringify({free:true}));
+        const pendingItems=pending.filter(e=>all?(!chatKey||e.chatKey===chatKey):e.chatKey===chatKey).sort((a,b)=>String(b.created).localeCompare(String(a.created)));
+        const pendingBytes=pendingItems.reduce((sum,e)=>sum+e.bytes,0);
+        const page={items,total:entries.length,offset,limit,hasMore:offset+limit<entries.length,pending:pendingItems,pendingBytes};
         if(!all)return page;
         const chats=new Map();
-        for(const e of every){const c=chats.get(e.chatKey)??{chatKey:e.chatKey,count:0,latest:''};c.count++;if(e.created>c.latest)c.latest=e.created;chats.set(e.chatKey,c);}
-        let bytes=0;
+        for(const e of [...every,...pending]){const c=chats.get(e.chatKey)??{chatKey:e.chatKey,count:0,latest:''};c.count++;if(e.created>c.latest)c.latest=e.created;chats.set(e.chatKey,c);}
+        let bytes=pending.reduce((sum,e)=>sum+e.bytes,0);
         for(const e of every){try{bytes+=(await fs.stat(store.png(e.id))).size;}catch{}}
-        return {...page,scope:'all',kind:req.query?.kind==='chat'?'chat':'all',chats:[...chats.values()].sort((a,b)=>b.latest.localeCompare(a.latest)),imageCount:every.length,bytes};
+        return {...page,scope:'all',kind:req.query?.kind==='chat'?'chat':'all',chats:[...chats.values()].sort((a,b)=>b.latest.localeCompare(a.latest)),imageCount:every.length+pending.length,bytes};
       });
       res.json(page);
     }catch(e){fail(res,e);}},
     delete:async(req,res)=>{try{
-      const {user,store,dirs}=context(req),b=req.body??{},chatKey=chatKeyOf(b.chatKey),all=b.all===true;
+      const ctx=context(req),{user,store,dirs}=ctx,b=req.body??{},chatKey=chatKeyOf(b.chatKey),all=b.all===true;
       const ids=all?[]:b.ids;
       if(!all&&(!Array.isArray(ids)||!ids.length||ids.length>500||ids.some(id=>typeof id!=='string'||!ID.test(id))))throw fail400('삭제할 이미지 ID가 잘못됐어요.');
       const result=await serial(user,async()=>{
-        const entries=await store.ready(),wanted=new Set(ids),deleted=[],skipped=[],failed=[],keep=[];
+        const entries=await store.ready(),pending=await pendingRequests(ctx,{includeUncertain:all}),wanted=new Set(ids),deleted=[],skipped=[],failed=[],keep=[];
         for(const entry of entries){
           if(entry.chatKey!==chatKey||(!all&&!wanted.has(entry.id))){keep.push(entry);continue;}
           wanted.delete(entry.id);
           try{
-            await unlinkQuiet(requestFile(dirs,entry.id));
             await unlinkQuiet(store.png(entry.id));
             await unlinkQuiet(store.record(entry.id));
+            await unlinkQuiet(requestFile(dirs,entry.id));
             deleted.push(entry.id);
           }catch{failed.push(entry.id);keep.push(entry);}
         }
+        const indexed=new Set(entries.map(entry=>entry.id));
+        for(const entry of pending){
+          if(indexed.has(entry.id)||entry.chatKey!==chatKey||(!all&&!wanted.has(entry.id)))continue;
+          wanted.delete(entry.id);
+          if(active.get(user)?.id===entry.id){failed.push(entry.id);continue;}
+          try{
+            await unlinkQuiet(store.png(entry.id));
+            await unlinkQuiet(store.record(entry.id));
+            // Keep only the ID marker so a delayed retry can't send the discarded request again.
+            await writeAtomic(requestFile(dirs,entry.id),JSON.stringify({state:'discarded'}));
+            if(unsaved.get(user)?.item.id===entry.id)unsaved.delete(user);
+            deleted.push(entry.id);
+          }catch{failed.push(entry.id);}
+        }
+        const current=active.get(user);
+        if(all&&current?.chatKey===chatKey&&!failed.includes(current.id))failed.push(current.id);
         for(const id of wanted)skipped.push(id);
         if(deleted.length)await store.save(keep).catch(()=>{}); // ready() rebuilds after record removal
         let workDeleted=false,workDeleteFailed=false;
@@ -307,7 +377,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         if(JSON.stringify({...b,snapshot:b.snapshot&&typeof b.snapshot==='object'?restSnapshot:b.snapshot}).length>250000)throw new PublicError('요청 크기가 너무 커요.',400);
         await serial(user,()=>ctx.store.ready());
         if(active.has(user))throw new PublicError('이 계정에서 이미 생성 중이에요. 완료 후 다시 시도해 주세요.',409);
-        active.set(user,requestId);
+        active.set(user,{id:requestId,chatKey:b.chatKey});
         ownsLock=true;
         const old=await ctx.store.readRecord(requestId);
         if(old){
@@ -333,7 +403,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         const journal=requestFile(ctx.dirs,requestId);
         await fs.mkdir(requestFolder(ctx.dirs),{recursive:true});
         // Persist the ID before calling NovelAI. A restart or ambiguous response never resends this ID.
-        try{await fs.writeFile(journal,JSON.stringify({state:'submitted'}),{flag:'wx'});}
+        try{await fs.writeFile(journal,JSON.stringify({state:'submitted',chatKey:b.chatKey}),{flag:'wx'});}
         catch(e){if(e.code==='EEXIST')throw new PublicError('이미 보낸 요청이에요. 같은 요청의 결과를 확인해 주세요.',409,'generation-check');throw e;}
         submitted=true;
         const upstream=await fetcher(`${ORIGIN}/ai/generate-image`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${secret}`},
@@ -341,7 +411,11 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         if(!upstream.ok) {
           // Do not return or log upstream account details or submitted RP text; only NovelAI's short note.
           let body='';try{body=(await readLimited(upstream,4096)).toString();}catch{}
-          throw naiError(upstream.status,body);
+          const definite=[400,401,402,403,404,405,413,415,422,429].includes(upstream.status);
+          if(definite)await writeAtomic(journal,JSON.stringify({state:'rejected',chatKey:b.chatKey})).catch(()=>{});
+          const error=naiError(upstream.status,body);
+          if(!definite&&upstream.status<500)throw new PublicError('NovelAI 생성 결과를 확인하지 못했어요. 같은 요청의 상태를 확인해 주세요.',502,'generation-check');
+          throw error;
         }
         const png=extractPng(await readLimited(upstream,30*1024*1024));
         const pending={state:'received',item,png};

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.21 — 2026-11-05
+
+- Include recoverable pictures in history and storage totals. Deleting them removes the pending payload and any partial PNG.
+- Distinguish confirmed NovelAI rejections from ambiguous failures. A delete check verifies image absence and reports the saved-work revision without deleting anything.
+
 ## 0.1.20 — 2026-11-05
 
 - Record the request ID before sending it to NovelAI. The status endpoint can read the original result, and its recovery action retries local storage when the server already received the image.

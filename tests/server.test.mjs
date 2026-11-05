@@ -82,7 +82,7 @@ test('server entry imports at the actual ST plugin depth and registers the docum
   const target=path.join(root,'plugins','naice-shot-server');await fs.cp(new URL('../',import.meta.url),target,{recursive:true,filter:src=>!/[\\/](\.git|tests|node_modules)([\\/]|$)/.test(path.relative(fileURLToPath(new URL('../',import.meta.url)),src)?'/'+path.relative(fileURLToPath(new URL('../',import.meta.url)),src):'')});
   const plugin=await import(pathToFileURL(path.join(target,'index.mjs')).href);const routes=[];
   await plugin.init({get:(route,handler)=>routes.push(['GET',route,handler]),post:(route,handler)=>routes.push(['POST',route,handler])});
-  assert.equal(plugin.info.id,'naice-shot');assert.deepEqual(routes.map(r=>r.slice(0,2)),[['GET','/status'],['GET','/history'],['GET','/draft'],['POST','/draft'],['POST','/generate'],['GET','/generation'],['POST','/generation'],['POST','/delete']]);
+  assert.equal(plugin.info.id,'naice-shot');assert.deepEqual(routes.map(r=>r.slice(0,2)),[['GET','/status'],['GET','/history'],['GET','/draft'],['POST','/draft'],['POST','/generate'],['GET','/generation'],['POST','/generation'],['POST','/delete'],['POST','/delete-check']]);
 });
 
 const gen=async(s,chatKey='chat-A')=>{const res=response();await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),chatKey}},res);assert.equal(res.statusCode,200);return res.body;};
@@ -415,4 +415,37 @@ test('partial deletion reports finished IDs and a retryable failed ID',async t=>
   try{result=await del(s,{chatKey:'chat-A',ids:[first.id,second.id]});}finally{fs.unlink=unlink;}
   assert.deepEqual(result.body.deleted,[second.id]);assert.deepEqual(result.body.failed,[first.id]);
   assert.deepEqual((await del(s,{chatKey:'chat-A',ids:[first.id]})).body.deleted,[first.id]);
+});
+
+test('a failed history write is discoverable after restart and can be discarded with its PNG',async t=>{
+  const s=await setup(t),id=s.req.body.requestId,write=fs.writeFile;
+  fs.writeFile=async (file,...args)=>{
+    if(String(file).startsWith(path.join(s.root,'naice-shot-records',id+'.json.')))throw Object.assign(new Error('disk full'),{code:'ENOSPC'});
+    return write(file,...args);
+  };
+  const failed=response();try{await s.handlers.generate(s.req,failed);}finally{fs.writeFile=write;}
+  assert.equal(failed.body.code,'generation-save');
+  const restarted=createHandlers({readKey:()=>{throw new Error('local history does not need a key');}});
+  const history=response(),query={scope:'all',chatKey:'chat-A'};
+  await restarted.history({user:s.req.user,query},history);
+  assert.equal(history.body.total,0);assert.equal(history.body.imageCount,1);
+  assert.deepEqual(history.body.pending.map(x=>x.id),[id]);assert.ok(history.body.pendingBytes>png.length);
+  assert.deepEqual(Object.keys(history.body.pending[0]).sort(),['bytes','chatKey','created','id']);
+  const denied=response();await restarted.delete({...s.req,body:{chatKey:'chat-B',ids:[id]}},denied);
+  assert.deepEqual(denied.body.deleted,[]);
+  const gone=response();await restarted.delete({...s.req,body:{chatKey:'chat-A',all:true}},gone);
+  assert.deepEqual(gone.body.deleted,[id]);
+  await assert.rejects(fs.stat(path.join(s.root,'images','naice-shot',id+'.png')),{code:'ENOENT'});
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(s.root,'naice-shot-requests',id+'.json'),'utf8')),{state:'discarded'});
+  const check=response();await restarted.deleteCheck({...s.req,body:{chatKey:'chat-A',ids:[id],all:true}},check);
+  assert.deepEqual(check.body.absent,[id]);assert.equal(check.body.remaining,false);assert.equal(s.calls(),1);
+});
+
+test('generation status distinguishes a confirmed rejection from an ambiguous upstream failure',async t=>{
+  for(const [status,expected] of [[400,'rejected'],[408,'unknown'],[503,'unknown']]){
+    const s=await setup(t,()=>new Response('Provider reply',{status}));
+    await s.handlers.generate(s.req,response());
+    const check=response();await s.handlers.generation({user:s.req.user,method:'GET',query:{requestId:s.req.body.requestId}},check);
+    assert.deepEqual(check.body,{state:expected});
+  }
 });
