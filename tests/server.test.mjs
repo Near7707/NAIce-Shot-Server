@@ -82,7 +82,7 @@ test('server entry imports at the actual ST plugin depth and registers the docum
   const target=path.join(root,'plugins','naice-shot-server');await fs.cp(new URL('../',import.meta.url),target,{recursive:true,filter:src=>!/[\\/](\.git|tests|node_modules)([\\/]|$)/.test(path.relative(fileURLToPath(new URL('../',import.meta.url)),src)?'/'+path.relative(fileURLToPath(new URL('../',import.meta.url)),src):'')});
   const plugin=await import(pathToFileURL(path.join(target,'index.mjs')).href);const routes=[];
   await plugin.init({get:(route,handler)=>routes.push(['GET',route,handler]),post:(route,handler)=>routes.push(['POST',route,handler])});
-  assert.equal(plugin.info.id,'naice-shot');assert.deepEqual(routes.map(r=>r.slice(0,2)),[['GET','/status'],['GET','/history'],['GET','/draft'],['POST','/draft'],['POST','/generate'],['GET','/generation'],['POST','/generation'],['POST','/delete'],['POST','/delete-check']]);
+  assert.equal(plugin.info.id,'naice-shot');assert.deepEqual(routes.map(r=>r.slice(0,2)),[['GET','/status'],['GET','/history'],['POST','/history'],['GET','/draft'],['POST','/draft'],['POST','/generate'],['GET','/generation'],['POST','/generation'],['POST','/delete'],['POST','/delete-check']]);
 });
 
 const gen=async(s,chatKey='chat-A')=>{const res=response();await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),chatKey}},res);assert.equal(res.statusCode,200);return res.body;};
@@ -448,4 +448,46 @@ test('generation status distinguishes a confirmed rejection from an ambiguous up
     const check=response();await s.handlers.generation({user:s.req.user,method:'GET',query:{requestId:s.req.body.requestId}},check);
     assert.deepEqual(check.body,{state:expected});
   }
+});
+
+test('0.1.22 (P3-2): delete all counts unknown and refused requests apart from deleted pictures; unknown stays unconfirmed',async t=>{
+  let mode='ok';
+  const s=await setup(t,()=>{if(mode==='lost')throw new TypeError('connection lost after submit');if(mode==='refused')return new Response('bad',{status:400});return new Response(archive(png));});
+  const picture=await gen(s);
+  mode='lost';const lost={...s.req.body,requestId:randomUUID()};await s.handlers.generate({...s.req,body:lost},response());
+  mode='refused';const refused={...s.req.body,requestId:randomUUID()};await s.handlers.generate({...s.req,body:refused},response());
+  const result=await del(s,{chatKey:'chat-A',all:true});
+  assert.deepEqual(result.body.deleted,[picture.id]);
+  assert.deepEqual([...result.body.cleared].sort(),[lost.requestId,refused.requestId].sort());
+  assert.deepEqual(result.body.unconfirmed,[lost.requestId]);
+  const marker=id=>fs.readFile(path.join(s.root,'naice-shot-requests',id+'.json'),'utf8').then(JSON.parse);
+  assert.deepEqual(await marker(lost.requestId),{state:'discarded',unconfirmed:true});
+  assert.deepEqual(await marker(refused.requestId),{state:'discarded'});
+  const check=async id=>{const res=response();await s.handlers.generation({user:s.req.user,method:'GET',query:{requestId:id}},res);return res.body;};
+  assert.deepEqual(await check(lost.requestId),{state:'discarded',unconfirmed:true});
+  assert.deepEqual(await check(refused.requestId),{state:'discarded'});
+  // The cleared ID still blocks a delayed retry of the same request.
+  mode='ok';const again=response();await s.handlers.generate({...s.req,body:lost},again);
+  assert.equal(again.statusCode,409);assert.equal(s.calls(),3);
+  // Deleting one picture by ID never touches request records.
+  const only=await gen(s);const one=await del(s,{chatKey:'chat-A',ids:[only.id]});
+  assert.deepEqual(one.body.deleted,[only.id]);assert.equal(one.body.cleared,undefined);
+});
+
+test('0.1.22: history by ID list (favorites) pages only those pictures and keeps the unfiltered count',async t=>{
+  const s=await setup(t),a=await gen(s),b=await gen(s),c=await gen(s),other=await gen(s,'chat-B');
+  const post=async body=>{const res=response();await s.handlers.history({...s.req,method:'POST',body},res);return res;};
+  const page=await post({chatKey:'chat-A',ids:[a.id,c.id,other.id],limit:1});
+  assert.equal(page.statusCode,200);
+  assert.deepEqual(page.body.items.map(x=>x.id),[c.id]);
+  assert.equal(page.body.total,2);assert.equal(page.body.hasMore,true);assert.equal(page.body.filtered,true);assert.equal(page.body.unfilteredCount,3);
+  assert.deepEqual((await post({chatKey:'chat-A',ids:[a.id,c.id],offset:1,limit:5})).body.items.map(x=>x.id),[a.id]);
+  const all=await post({scope:'all',ids:[b.id,other.id]});
+  assert.deepEqual(all.body.items.map(x=>x.id).sort(),[b.id,other.id].sort());assert.equal(all.body.scope,'all');assert.equal(all.body.unfilteredCount,4);
+  assert.deepEqual(all.body.pending,[]);
+  assert.equal((await post({chatKey:'chat-A',ids:['../x']})).statusCode,400);
+  assert.equal((await post({chatKey:'chat-A',ids:'nope'})).statusCode,400);
+  // Without ids, POST and GET give the same page; GET ignores an ids field.
+  const plain=await post({chatKey:'chat-A'});assert.equal(plain.body.total,3);assert.equal(plain.body.filtered,undefined);
+  assert.equal((await hist(s,{chatKey:'chat-A',ids:[a.id]})).total,3);
 });

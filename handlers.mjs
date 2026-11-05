@@ -56,7 +56,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.21';
+const SERVER_VERSION='0.1.22';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
@@ -206,7 +206,8 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         const pngBytes=await fs.stat(store.png(id)).then(x=>x.size,e=>{if(e.code==='ENOENT')return 0;throw e;});
         pending.push({id,chatKey:request.item.chatKey,created:request.item.created,bytes:bytes+pngBytes});
       }else if(includeUncertain&&['submitted','rejected'].includes(request?.state)&&typeof request.chatKey==='string'){
-        pending.push({id,chatKey:request.chatKey,bytes:0});
+        // 0.1.22: not a picture. `request` marks it so deletion counts it apart from deleted pictures.
+        pending.push({id,chatKey:request.chatKey,bytes:0,request:request.state});
       }
     }
     return pending;
@@ -234,7 +235,8 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       if(item&&await exists(ctx.store.png(id)))return {state:'complete',item};
       const volatile=unsaved.get(ctx.user);
       const pending=volatile?.item.id===id?volatile:await readRequest(ctx.dirs,id);
-      if(['rejected','discarded'].includes(pending?.state))return {state:pending.state};
+      // 0.1.22: a request discarded before its result was known stays "unconfirmed" — it may still have been charged.
+      if(['rejected','discarded'].includes(pending?.state))return {state:pending.state,...(pending.state==='discarded'&&pending.unconfirmed===true?{unconfirmed:true}:{})};
       if(pending?.state!=='received')return {state:pending||item?'unknown':'missing'};
       if(!recover)return {state:'save-failed'};
       try{
@@ -244,7 +246,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       }catch{return {state:'save-failed'};}
     });
   }
-  const features=['paged-history','delete','private-records','all-history','history-kinds','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes','account-shape','generation-recovery','pending-history','delete-check'];
+  const features=['paged-history','delete','private-records','all-history','history-kinds','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes','account-shape','generation-recovery','pending-history','delete-check','history-ids','delete-cleared'];
   return {
     generation:async(req,res)=>{try{
       const ctx=context(req),recover=req.method==='POST',id=recover?req.body?.requestId:req.query?.requestId;
@@ -298,26 +300,37 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       if(req.query?.quick==='1'||!secret)return res.json({keyConfigured:!!secret,version:SERVER_VERSION,features,minClient:MIN_CLIENT_VERSION});
       res.json({keyConfigured:true,version:SERVER_VERSION,features,minClient:MIN_CLIENT_VERSION,subscription:await subscription(secret,{shape:req.query?.shape==='1'})});}catch(e){fail(res,e);}},
     history:async(req,res)=>{try{
-      const ctx=context(req),{user,store}=ctx,chatKey=String(req.query?.chatKey??''),all=req.query?.scope==='all';
-      const offset=Math.max(0,Number.parseInt(req.query?.offset??'0',10)||0),limit=Math.min(100,Math.max(1,Number.parseInt(req.query?.limit??'20',10)||20));
+      // 0.1.22: POST takes the same fields in the body, plus `ids` (only these pictures, e.g. the extension's favorites).
+      const q=req.method==='POST'?(req.body&&typeof req.body==='object'?req.body:{}):(req.query??{});
+      const ctx=context(req),{user,store}=ctx,chatKey=String(q.chatKey??''),all=q.scope==='all';
+      const offset=Math.max(0,Number.parseInt(q.offset??'0',10)||0),limit=Math.min(100,Math.max(1,Number.parseInt(q.limit??'20',10)||20));
+      let only=null;
+      if(req.method==='POST'&&q.ids!==undefined){
+        if(!Array.isArray(q.ids)||q.ids.length>5000||q.ids.some(id=>!validId(id)))throw fail400('이미지 ID 목록이 잘못됐어요.');
+        only=new Set(q.ids);
+      }
       const page=await serial(user,async()=>{
         const records=await store.ready();
         // Filter before pagination and summaries; drawing mode never changes history scope.
-        const every=req.query?.kind==='chat'?records.filter(e=>e.chatKey!==JSON.stringify({free:true})):records;
+        const every=q.kind==='chat'?records.filter(e=>e.chatKey!==JSON.stringify({free:true})):records;
         // scope=all lists every chat (optionally one chat via chatKey) so images of deleted or renamed chats can be cleaned up.
-        const entries=every.filter(e=>all?(!chatKey||e.chatKey===chatKey):e.chatKey===chatKey).sort((a,b)=>b.created.localeCompare(a.created));
+        const inScope=every.filter(e=>all?(!chatKey||e.chatKey===chatKey):e.chatKey===chatKey);
+        const entries=(only?inScope.filter(e=>only.has(e.id)):inScope).sort((a,b)=>b.created.localeCompare(a.created));
         const items=[];
         for(const entry of entries.slice(offset,offset+limit)){const item=await store.readRecord(entry.id);if(item)items.push(item);}
-        const pending=(await pendingRequests(ctx)).filter(e=>req.query?.kind!=='chat'||e.chatKey!==JSON.stringify({free:true}));
-        const pendingItems=pending.filter(e=>all?(!chatKey||e.chatKey===chatKey):e.chatKey===chatKey).sort((a,b)=>String(b.created).localeCompare(String(a.created)));
+        const pending=(await pendingRequests(ctx)).filter(e=>q.kind!=='chat'||e.chatKey!==JSON.stringify({free:true}));
+        const scopedPending=pending.filter(e=>all?(!chatKey||e.chatKey===chatKey):e.chatKey===chatKey).sort((a,b)=>String(b.created).localeCompare(String(a.created)));
+        // An ID list shows saved pictures only; the unfiltered count stays for "delete all" questions.
+        const pendingItems=only?[]:scopedPending;
         const pendingBytes=pendingItems.reduce((sum,e)=>sum+e.bytes,0);
-        const page={items,total:entries.length,offset,limit,hasMore:offset+limit<entries.length,pending:pendingItems,pendingBytes};
+        const page={items,total:entries.length,offset,limit,hasMore:offset+limit<entries.length,pending:pendingItems,pendingBytes,
+          ...(only?{filtered:true,unfilteredCount:inScope.length+scopedPending.length}:{})};
         if(!all)return page;
         const chats=new Map();
         for(const e of [...every,...pending]){const c=chats.get(e.chatKey)??{chatKey:e.chatKey,count:0,latest:''};c.count++;if(e.created>c.latest)c.latest=e.created;chats.set(e.chatKey,c);}
         let bytes=pending.reduce((sum,e)=>sum+e.bytes,0);
         for(const e of every){try{bytes+=(await fs.stat(store.png(e.id))).size;}catch{}}
-        return {...page,scope:'all',kind:req.query?.kind==='chat'?'chat':'all',chats:[...chats.values()].sort((a,b)=>b.latest.localeCompare(a.latest)),imageCount:every.length+pending.length,bytes};
+        return {...page,scope:'all',kind:q.kind==='chat'?'chat':'all',chats:[...chats.values()].sort((a,b)=>b.latest.localeCompare(a.latest)),imageCount:every.length+pending.length,bytes};
       });
       res.json(page);
     }catch(e){fail(res,e);}},
@@ -326,7 +339,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       const ids=all?[]:b.ids;
       if(!all&&(!Array.isArray(ids)||!ids.length||ids.length>500||ids.some(id=>typeof id!=='string'||!ID.test(id))))throw fail400('삭제할 이미지 ID가 잘못됐어요.');
       const result=await serial(user,async()=>{
-        const entries=await store.ready(),pending=await pendingRequests(ctx,{includeUncertain:all}),wanted=new Set(ids),deleted=[],skipped=[],failed=[],keep=[];
+        const entries=await store.ready(),pending=await pendingRequests(ctx,{includeUncertain:all}),wanted=new Set(ids),deleted=[],skipped=[],failed=[],keep=[],cleared=[],unconfirmed=[];
         for(const entry of entries){
           if(entry.chatKey!==chatKey||(!all&&!wanted.has(entry.id))){keep.push(entry);continue;}
           wanted.delete(entry.id);
@@ -342,13 +355,16 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
           if(indexed.has(entry.id)||entry.chatKey!==chatKey||(!all&&!wanted.has(entry.id)))continue;
           wanted.delete(entry.id);
           if(active.get(user)?.id===entry.id){failed.push(entry.id);continue;}
+          // 0.1.22 (P3-2): a request record without a picture (sent with no known result, or refused by NovelAI) is
+          // cleared, not counted as a deleted picture. One sent with no known result keeps "unconfirmed" in its marker.
+          const sentUnknown=entry.request==='submitted';
           try{
-            await unlinkQuiet(store.png(entry.id));
-            await unlinkQuiet(store.record(entry.id));
+            if(!entry.request){await unlinkQuiet(store.png(entry.id));await unlinkQuiet(store.record(entry.id));}
             // Keep only the ID marker so a delayed retry can't send the discarded request again.
-            await writeAtomic(requestFile(dirs,entry.id),JSON.stringify({state:'discarded'}));
+            await writeAtomic(requestFile(dirs,entry.id),JSON.stringify({state:'discarded',...(sentUnknown?{unconfirmed:true}:{})}));
             if(unsaved.get(user)?.item.id===entry.id)unsaved.delete(user);
-            deleted.push(entry.id);
+            if(entry.request){cleared.push(entry.id);if(sentUnknown)unconfirmed.push(entry.id);}
+            else deleted.push(entry.id);
           }catch{failed.push(entry.id);}
         }
         const current=active.get(user);
@@ -357,7 +373,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         if(deleted.length)await store.save(keep).catch(()=>{}); // ready() rebuilds after record removal
         let workDeleted=false,workDeleteFailed=false;
         if(all&&!failed.length){try{workDeleted=(await tombstone(workFile(dirs,chatKey))).had;}catch{workDeleteFailed=true;}}
-        return {deleted,skipped,workDeleted,...(failed.length?{failed}:{}),...(workDeleteFailed?{workDeleteFailed:true}:{})};
+        return {deleted,skipped,workDeleted,...(cleared.length?{cleared,unconfirmed}:{}),...(failed.length?{failed}:{}),...(workDeleteFailed?{workDeleteFailed:true}:{})};
       });
       res.json(result);
     }catch(e){fail(res,e);}},

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.22 — 2026-11-06
+
+- History by ID list: `POST /history` takes the same fields as `GET` plus `ids` (up to 5,000 picture IDs), and pages only those pictures inside the asked range. The reply adds `filtered:true` and `unfilteredCount` (the range's full count, for "delete all" questions); pending pictures are left out of a filtered page. Used by the extension's ★-only view (0.1.84). Feature flag `history-ids`.
+- Delete all (P3-2): request records without a picture — sent with no known result (`submitted`) or refused by NovelAI (`rejected`) — are no longer reported as deleted pictures. They come back in `cleared`, and the unknown ones also in `unconfirmed`. Their marker stays (a delayed retry is still refused); an unknown one keeps `unconfirmed:true`, and the status check answers `{state:'discarded',unconfirmed:true}` so the extension keeps its "check" mark. Feature flag `delete-cleared`.
+- Validation: 39 server Node tests (+2; each fails with its fix reverted).
+
 ## 0.1.21 — 2026-11-05
 
 - Include recoverable pictures in history and storage totals. Deleting them removes the pending payload and any partial PNG.
