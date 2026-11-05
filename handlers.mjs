@@ -56,7 +56,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.18';
+const SERVER_VERSION='0.1.19';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
@@ -69,7 +69,7 @@ const workFolder=dirs=>path.join(dirs.root,'naice-shot-work');
 const workFile=(dirs,chatKey)=>path.join(workFolder(dirs),createHash('sha256').update(chatKey).digest('hex')+'.json');
 const FREE_TEXT_LIMIT=4000; // characters a person sees (a @profile chip counts as @name)
 const FREE_TEXT_STORED_LIMIT=180000; // the stored text form: a chip is @[name](ref:ID)
-const visibleLength=t=>t.replace(/@\[([^\]\n]{0,60})\]\(ref:[A-Za-z0-9_-]*\)/gu,(m,n)=>`@${n}`).length;
+const visibleLength=t=>t.replace(/@\[([^\]\n]{0,200})\]\(ref:[A-Za-z0-9_-]*\)/gu,(m,n)=>`@${n}`).length;
 // NovelAI's own short explanation, cleaned for display: one line, no credentials, at most 120 characters.
 export function naiNote(body){
   let text=String(body??'');try{const j=JSON.parse(text);text=typeof j==='string'?j:j?.message??j?.error??j?.detail??text;}catch{}

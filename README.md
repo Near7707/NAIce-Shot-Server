@@ -26,7 +26,7 @@ git으로 설치했다면 **실리태번을 켤 때마다 자동으로 최신 �
 
 확장과 서버를 같이 업데이트해야 하는 버전은 확장 [CHANGELOG](https://github.com/Near7707/NAIce-Shot/blob/main/CHANGELOG.md)에 **extension + server**라고 적혀 있어요. 순서는 **서버 업데이트 → 실리태번 재시작 → 확장 업데이트 → 새로고침**이에요. 서버가 이전 버전이면 확장 패널을 열 때 안내가 떠요.
 
-이력은 확장에서 이 채팅·모든 채팅·프리샷·전체 보기로 나눠 볼 수 있어요. UI v0.1.47의 모든 채팅 보기는 서버 v0.1.13 이상이 필요해요. UI v0.1.77은 서버 v0.1.18 이상이 필요해요(상황 글 길이를 NovelAI 호출 전에 검사해요). 개발·리뷰 결과는 [공통 리뷰 기록](https://github.com/Near7707/NAIce-Shot/blob/main/docs/REVIEW.md)에 모아요.
+이력은 확장에서 이 채팅·모든 채팅·프리샷·전체 보기로 나눠 볼 수 있어요. UI v0.1.47의 모든 채팅 보기는 서버 v0.1.13 이상이 필요해요. UI v0.1.80은 서버 v0.1.19 이상이 필요해요(상황 글 길이를 NovelAI 호출 전에 검사하고, 긴 칩 이름도 화면 글자로 세요). 개발·리뷰 결과는 [공통 리뷰 기록](https://github.com/Near7707/NAIce-Shot/blob/main/docs/REVIEW.md)에 모아요.
 
 ## 저장하는 데이터
 

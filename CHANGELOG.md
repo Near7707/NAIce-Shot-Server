@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.19 — 2026-11-05
+
+- A `@[name](ref:ID)` chip with a name longer than 60 letters (up to 200, the longest profile name) now counts as `@name` too when the situation text is measured, the same as UI 0.1.80. Before, such a chip was counted at its full stored length, so a text the extension allowed could be refused.
+- Validation: 31 server Node tests (one more case in an existing test).
+
 ## 0.1.18 — 2026-11-05
 
 - The 프리샷 situation text (`snapshot.freeText`) is checked on its own, before NovelAI is called: at most 4,000 characters a person sees (a `@[name](ref:ID)` chip counts as `@name`) and at most 180,000 stored. Over the limit the request is refused with a clear 400 and nothing is sent to NovelAI, instead of the text being dropped silently from the history record. The 250,000-character request limit now counts everything except that text. A non-text value is refused as well.

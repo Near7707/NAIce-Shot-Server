@@ -234,6 +234,8 @@ test('프리샷 history keeps its situation text; other snapshots never gain one
  g=await gen(chip.repeat(1100));assert.equal(g.res.statusCode,400);assert.equal(g.sent,0,'visible 4,400');
  g=await gen('@[a](ref:x)'.repeat(20000));assert.equal(g.res.statusCode,400);assert.equal(g.sent,0,'over the stored ceiling');
  g=await gen(12);assert.equal(g.res.statusCode,400);assert.equal(g.sent,0);
+ // 0.1.19: a 150-letter chip name counts as @name (151 seen)
+ const longChip=`@[${'가'.repeat(150)}](ref:${'b'.repeat(36)})`;g=await gen(longChip.repeat(26));assert.equal(g.res.statusCode,200,'26 x 151 = 3,926 seen');g=await gen(longChip.repeat(27));assert.equal(g.res.statusCode,400,'27 x 151 = 4,077 seen');
 });
 test('deleted work leaves a marker: nothing to read, old first saves refused, a fresh revision accepted',async t=>{
  const s=await setup(t);const call=async(method,body={},query={})=>{const res=response();await s.handlers.draft({method,user:s.req.user,body,query},res);return res;};
