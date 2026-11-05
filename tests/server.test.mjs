@@ -7,7 +7,7 @@ import {randomUUID} from 'node:crypto';
 import {deflateRawSync} from 'node:zlib';
 import {pathToFileURL,fileURLToPath} from 'node:url';
 import {createHandlers,extractPng,naiError,naiNote} from '../handlers.mjs';
-import {DEFAULTS} from '../core.mjs';
+import {DEFAULTS,VERSION} from '../core.mjs';
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRz8AAAAASUVORK5CYII=','base64');
 function archive(data) {
   const name=Buffer.from('image_0.png'),packed=deflateRawSync(data),local=Buffer.alloc(30),central=Buffer.alloc(46),end=Buffer.alloc(22);
@@ -82,7 +82,7 @@ test('server entry imports at the actual ST plugin depth and registers the docum
   const target=path.join(root,'plugins','naice-shot-server');await fs.cp(new URL('../',import.meta.url),target,{recursive:true,filter:src=>!/[\\/](\.git|tests|node_modules)([\\/]|$)/.test(path.relative(fileURLToPath(new URL('../',import.meta.url)),src)?'/'+path.relative(fileURLToPath(new URL('../',import.meta.url)),src):'')});
   const plugin=await import(pathToFileURL(path.join(target,'index.mjs')).href);const routes=[];
   await plugin.init({get:(route,handler)=>routes.push(['GET',route,handler]),post:(route,handler)=>routes.push(['POST',route,handler])});
-  assert.equal(plugin.info.id,'naice-shot');assert.deepEqual(routes.map(r=>r.slice(0,2)),[['GET','/status'],['GET','/history'],['GET','/draft'],['POST','/draft'],['POST','/generate'],['POST','/delete']]);
+  assert.equal(plugin.info.id,'naice-shot');assert.deepEqual(routes.map(r=>r.slice(0,2)),[['GET','/status'],['GET','/history'],['GET','/draft'],['POST','/draft'],['POST','/generate'],['GET','/generation'],['POST','/generation'],['POST','/delete']]);
 });
 
 const gen=async(s,chatKey='chat-A')=>{const res=response();await s.handlers.generate({...s.req,body:{...s.req.body,requestId:randomUUID(),chatKey}},res);assert.equal(res.statusCode,200);return res.body;};
@@ -297,7 +297,7 @@ test('account shape: [NAI 연결 확인] gets field names and kinds only, never 
   'perks.unlimitedImageGenerationLimits[].resolution: number','trainingStepsLeft.purchasedTrainingSteps: number','paymentProcessorData.note: string','(이름 생략): number'])
   assert.ok(shape.includes(line),line);
  const text=JSON.stringify(shape);for(const v of ['value-must-not-leak','1893456000','4194304','8192','10000'])assert.ok(!text.includes(v),`no value ${v}`);
- assert.match(res.body.version,/^0\.1\.1[4-9]$/);
+ assert.equal(res.body.version,VERSION);
 });
 test('free check (0.1.15): an active Opus V4.5 without the old perk passes with consent off; every other account case is blocked before NovelAI',async t=>{
  const v45=body=>({...body,requestId:randomUUID(),options:{...body.options,model:'nai-diffusion-4-5-full'},allowAnlas:false});
@@ -355,4 +355,64 @@ test('saved work still fits the longest situation text and request the extension
  const work={scene:{characters:[],location:'cafe'},freeText:free,wish,undoClear:{scene:{characters:[],location:'old'},freeText:free,wish}};
  const saved=await call('POST',{chatKey:'chat-L',work,expectedRevision:null});assert.equal(saved.statusCode,200,JSON.stringify(saved.body).slice(0,200));
  const read=await call('GET',{},{chatKey:'chat-L'});assert.equal(read.body.work.freeText,free);assert.equal(read.body.work.undoClear.wish,wish);
+});
+
+test('the same request can be checked during generation and after a lost response',async t=>{
+  let release,started;
+  const blocked=new Promise(resolve=>{release=resolve;}),ready=new Promise(resolve=>{started=resolve;});
+  const s=await setup(t,async()=>{started();await blocked;return new Response(archive(png));});
+  const check=async()=>{
+    const res=response();
+    await s.handlers.generation({user:s.req.user,method:'GET',query:{requestId:s.req.body.requestId}},res);
+    return res.body;
+  };
+  const running=s.handlers.generate(s.req,response());
+  await ready;assert.deepEqual(await check(),{state:'processing'});
+  release();await running;
+  assert.equal((await check()).state,'complete');
+  assert.equal(s.calls(),1);
+});
+
+test('a request that may have reached NovelAI is never resubmitted with the same ID, even after restart',async t=>{
+  const s=await setup(t,()=>{throw new TypeError('connection lost after submit');});
+  const failed=response();await s.handlers.generate(s.req,failed);
+  assert.equal(failed.body.code,'generation-check');
+  let calls=0;
+  const restarted=createHandlers({readKey:()=>'test',fetcher:async()=>{calls++;throw new Error('unexpected request');}});
+  const repeated=response();await restarted.generate(s.req,repeated);
+  assert.equal(repeated.body.code,'generation-check');assert.equal(calls,0);
+  const check=response();await restarted.generation({user:s.req.user,method:'GET',query:{requestId:s.req.body.requestId}},check);
+  assert.deepEqual(check.body,{state:'unknown'});assert.equal(s.calls(),1);
+});
+
+test('failed image-history write can resume after restart with no second NovelAI call',async t=>{
+  const s=await setup(t),id=s.req.body.requestId,write=fs.writeFile;
+  const failed=response();
+  fs.writeFile=async (file,...args)=>{
+    if(String(file).startsWith(path.join(s.root,'naice-shot-records',id+'.json.')))throw Object.assign(new Error('disk full'),{code:'ENOSPC'});
+    return write(file,...args);
+  };
+  try{await s.handlers.generate(s.req,failed);}finally{fs.writeFile=write;}
+  assert.equal(failed.body.code,'generation-save');
+  const restarted=createHandlers({readKey:()=>{throw new Error('local recovery does not need a key');}});
+  const status=response(),recovered=response();
+  await restarted.generation({user:s.req.user,method:'GET',query:{requestId:id}},status);
+  assert.deepEqual(status.body,{state:'save-failed'});
+  await restarted.generation({user:s.req.user,method:'POST',body:{requestId:id}},recovered);
+  assert.equal(recovered.body.state,'complete');assert.equal(recovered.body.item.id,id);
+  assert.equal(s.calls(),1);
+  assert.deepEqual(await fs.readFile(path.join(s.root,'images','naice-shot',id+'.png')),png);
+});
+
+test('partial deletion reports finished IDs and a retryable failed ID',async t=>{
+  const s=await setup(t),first=await gen(s),second=await gen(s),unlink=fs.unlink;
+  const target=path.join(s.root,'naice-shot-records',first.id+'.json');
+  fs.unlink=async (file,...args)=>{
+    if(file===target)throw Object.assign(new Error('locked file'),{code:'EACCES'});
+    return unlink(file,...args);
+  };
+  let result;
+  try{result=await del(s,{chatKey:'chat-A',ids:[first.id,second.id]});}finally{fs.unlink=unlink;}
+  assert.deepEqual(result.body.deleted,[second.id]);assert.deepEqual(result.body.failed,[first.id]);
+  assert.deepEqual((await del(s,{chatKey:'chat-A',ids:[first.id]})).body.deleted,[first.id]);
 });

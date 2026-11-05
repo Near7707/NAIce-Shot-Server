@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.20 — 2026-11-05
+
+- Record the request ID before sending it to NovelAI. The status endpoint can read the original result, and its recovery action retries local storage when the server already received the image.
+- Return the IDs that were deleted and the IDs that still need another deletion attempt. Keep saved work when any image deletion fails.
+
 ## 0.1.19 — 2026-11-05
 
 - A `@[name](ref:ID)` chip with a name longer than 60 letters (up to 200, the longest profile name) now counts as `@name` too when the situation text is measured, the same as UI 0.1.80. Before, such a chip was counted at its full stored length, so a text the extension allowed could be refused.

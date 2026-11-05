@@ -56,14 +56,14 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.19';
+const SERVER_VERSION='0.1.20';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
 const fail400=message=>new PublicError(message,400);
 const exists=async file=>{try{await fs.access(file);return true;}catch{return false;}};
 async function unlinkQuiet(file){try{await fs.unlink(file);return true;}catch(e){if(e.code==='ENOENT')return false;throw e;}}
-async function writeAtomic(file,text){const tmp=`${file}.${process.pid}.${Date.now()}.tmp`;try{await fs.writeFile(tmp,text);await fs.rename(tmp,file);}finally{await unlinkQuiet(tmp);}}
+async function writeAtomic(file,text){const tmp=`${file}.${randomUUID()}.tmp`;try{await fs.writeFile(tmp,text);await fs.rename(tmp,file);}finally{await unlinkQuiet(tmp);}}
 async function moveFile(from,to){try{await fs.rename(from,to);}catch(e){if(e.code!=='EXDEV')throw e;await fs.copyFile(from,to,fs.constants.COPYFILE_EXCL);await fs.unlink(from);}}
 const workFolder=dirs=>path.join(dirs.root,'naice-shot-work');
 const workFile=(dirs,chatKey)=>path.join(workFolder(dirs),createHash('sha256').update(chatKey).digest('hex')+'.json');
@@ -130,7 +130,7 @@ function createStore(dirs) {
   return {images,records,png,record,readRecord,ready,save};
 }
 export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=180000}) {
-  const active=new Set(),queues=new Map();
+  const active=new Map(),queues=new Map(),unsaved=new Map();
   // Index reads/writes for one user never interleave (generate, delete, history, migration).
   const serial=(user,fn)=>{
     const run=(queues.get(user)??Promise.resolve()).then(()=>fn());
@@ -182,8 +182,46 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
   };
   const fail=(res,e)=>res.status(e instanceof PublicError?e.status:500).json({error:e instanceof PublicError?e.message:'요청 처리 중 내부 오류가 발생했어요. 설치 경로와 파일 접근 권한을 확인해 주세요.',...(e instanceof PublicError&&e.code?{code:e.code}:{})});
   const chatKeyOf=value=>{if(typeof value!=='string'||!value||value.length>1000)throw fail400('채팅 정보가 잘못됐어요.');return value;};
-  const features=['paged-history','delete','private-records','all-history','history-kinds','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes','account-shape'];
+  const requestFolder=dirs=>path.join(dirs.root,'naice-shot-requests');
+  const requestFile=(dirs,id)=>path.join(requestFolder(dirs),id+'.json');
+  const validId=id=>typeof id==='string'&&ID.test(id);
+  async function readRequest(dirs,id){
+    try{return JSON.parse(await fs.readFile(requestFile(dirs,id),'utf8'));}
+    catch(e){if(e.code==='ENOENT')return null;throw e;}
+  }
+  async function finishGeneration(ctx,item,png){
+    const {store,dirs}=ctx,id=item.id;
+    const entries=await store.ready();
+    await writeAtomic(store.png(id),png);
+    await writeAtomic(store.record(id),JSON.stringify(item));
+    await store.save([...entries.filter(entry=>entry.id!==id),metaOf(item)]);
+    // If cleanup fails, the completed record still wins. Deletion removes any recovery data first.
+    await unlinkQuiet(requestFile(dirs,id)).catch(()=>{});
+  }
+  async function generationState(ctx,id,{recover=false}={}){
+    if(active.get(ctx.user)===id)return {state:'processing'};
+    return serial(ctx.user,async()=>{
+      if(active.get(ctx.user)===id)return {state:'processing'};
+      const item=await ctx.store.readRecord(id);
+      if(item&&await exists(ctx.store.png(id)))return {state:'complete',item};
+      const volatile=unsaved.get(ctx.user);
+      const pending=volatile?.item.id===id?volatile:await readRequest(ctx.dirs,id);
+      if(pending?.state!=='received')return {state:pending||item?'unknown':'missing'};
+      if(!recover)return {state:'save-failed'};
+      try{
+        await finishGeneration(ctx,pending.item,Buffer.isBuffer(pending.png)?pending.png:Buffer.from(pending.png,'base64'));
+        if(volatile===pending)unsaved.delete(ctx.user);
+        return {state:'complete',item:pending.item};
+      }catch{return {state:'save-failed'};}
+    });
+  }
+  const features=['paged-history','delete','private-records','all-history','history-kinds','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes','account-shape','generation-recovery'];
   return {
+    generation:async(req,res)=>{try{
+      const ctx=context(req),recover=req.method==='POST',id=recover?req.body?.requestId:req.query?.requestId;
+      if(!validId(id))throw fail400('요청 ID가 잘못됐어요.');
+      res.json(await generationState(ctx,id,{recover}));
+    }catch(e){fail(res,e);}},
     draft:async(req,res)=>{try{
       const {dirs,user}=context(req),body=req.body??{};
       // delete+all removes every saved work of this user (settings → 저장된 작업 모두 지우기).
@@ -234,25 +272,30 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       const ids=all?[]:b.ids;
       if(!all&&(!Array.isArray(ids)||!ids.length||ids.length>500||ids.some(id=>typeof id!=='string'||!ID.test(id))))throw fail400('삭제할 이미지 ID가 잘못됐어요.');
       const result=await serial(user,async()=>{
-        const entries=await store.ready(),wanted=new Set(ids),deleted=[],skipped=[],keep=[];
+        const entries=await store.ready(),wanted=new Set(ids),deleted=[],skipped=[],failed=[],keep=[];
         for(const entry of entries){
-          // Only images generated in the requesting chat can be deleted from that chat.
-          if(entry.chatKey===chatKey&&(all||wanted.has(entry.id))){await unlinkQuiet(store.png(entry.id));await unlinkQuiet(store.record(entry.id));deleted.push(entry.id);wanted.delete(entry.id);}
-          else keep.push(entry);
+          if(entry.chatKey!==chatKey||(!all&&!wanted.has(entry.id))){keep.push(entry);continue;}
+          wanted.delete(entry.id);
+          try{
+            await unlinkQuiet(requestFile(dirs,entry.id));
+            await unlinkQuiet(store.png(entry.id));
+            await unlinkQuiet(store.record(entry.id));
+            deleted.push(entry.id);
+          }catch{failed.push(entry.id);keep.push(entry);}
         }
         for(const id of wanted)skipped.push(id);
-        if(deleted.length)await store.save(keep);
-        // Deleting a chat's whole history also forgets that chat's saved drawing work.
-        const workDeleted=all?(await tombstone(workFile(dirs,chatKey))).had:false;
-        return {deleted,skipped,workDeleted};
+        if(deleted.length)await store.save(keep).catch(()=>{}); // ready() rebuilds after record removal
+        let workDeleted=false,workDeleteFailed=false;
+        if(all&&!failed.length){try{workDeleted=(await tombstone(workFile(dirs,chatKey))).had;}catch{workDeleteFailed=true;}}
+        return {deleted,skipped,workDeleted,...(failed.length?{failed}:{}),...(workDeleteFailed?{workDeleteFailed:true}:{})};
       });
       res.json(result);
     }catch(e){fail(res,e);}},
     generate:async(req,res)=>{
-      let user,requestId,ownsLock=false;
+      let user,requestId,ownsLock=false,submitted=false;
       try {
         const ctx=context(req);user=ctx.user;const b=req.body;
-        if(!b || !ID.test(b.requestId) || typeof b.chatKey!=='string'||b.chatKey.length>1000)throw new PublicError('요청 ID 또는 채팅 정보가 잘못됐어요.',400);
+        if(!b || !validId(b.requestId) || typeof b.chatKey!=='string'||b.chatKey.length>1000)throw new PublicError('요청 ID 또는 채팅 정보가 잘못됐어요.',400);
         requestId=b.requestId;
         // 0.1.18: the situation text is checked on its own, before NovelAI is called, and is never dropped silently.
         const free=b.snapshot?.freeText;
@@ -263,10 +306,15 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         const {freeText:_free,...restSnapshot}=b.snapshot&&typeof b.snapshot==='object'?b.snapshot:{};
         if(JSON.stringify({...b,snapshot:b.snapshot&&typeof b.snapshot==='object'?restSnapshot:b.snapshot}).length>250000)throw new PublicError('요청 크기가 너무 커요.',400);
         await serial(user,()=>ctx.store.ready());
-        const old=await ctx.store.readRecord(requestId);if(old)return res.json(old);
         if(active.has(user))throw new PublicError('이 계정에서 이미 생성 중이에요. 완료 후 다시 시도해 주세요.',409);
-        active.add(user);
+        active.set(user,requestId);
         ownsLock=true;
+        const old=await ctx.store.readRecord(requestId);
+        if(old){
+          if(await exists(ctx.store.png(requestId)))return res.json(old);
+          throw new PublicError('이 요청의 그림 파일을 확인하지 못했어요. 같은 요청의 상태를 확인해 주세요.',409,'generation-check');
+        }
+        if(await readRequest(ctx.dirs,requestId))throw new PublicError('이미 보낸 요청이에요. 같은 요청의 결과를 확인해 주세요.',409,'generation-check');
         let assembled,payload;
         try{assembled=validateAssembled(b.assembled,b.options?.model);payload=buildPayload(assembled,b.options);}catch(e){throw fail400(e.message);}
         const secret=ctx.key();
@@ -276,6 +324,18 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         const guard=costGuard(b.options,sub);
         // The extension's own consent block, distinct from NovelAI's errors (428, code anlas-consent).
         if(!guard.free && b.allowAnlas!==true)throw new PublicError(`${guard.message} Anlas 사용 허용이 꺼져 있어서 보내지 않았어요.`,428,'anlas-consent');
+        const item={id:requestId,created:new Date().toISOString(),chatKey:b.chatKey,
+          image:`/user/images/naice-shot/${requestId}.png`,seed:b.options.seed,options:b.options,assembled,
+          snapshot:b.snapshot&&typeof b.snapshot==='object'?{scene:b.snapshot.scene??null,
+            // 프리샷 images keep their situation text so restoring from history brings it back.
+            ...(b.snapshot.mode==='free'?{mode:'free',...(typeof b.snapshot.freeText==='string'&&b.snapshot.freeText.length<=FREE_TEXT_STORED_LIMIT&&visibleLength(b.snapshot.freeText)<=FREE_TEXT_LIMIT?{freeText:b.snapshot.freeText}:{})}:{}),
+            ...(b.retainRawExtraction===true&&typeof b.snapshot.rawExtraction==='string'?{rawExtraction:stripReasoningBlocks(b.snapshot.rawExtraction)}:{})}:null,payload,version:SERVER_VERSION};
+        const journal=requestFile(ctx.dirs,requestId);
+        await fs.mkdir(requestFolder(ctx.dirs),{recursive:true});
+        // Persist the ID before calling NovelAI. A restart or ambiguous response never resends this ID.
+        try{await fs.writeFile(journal,JSON.stringify({state:'submitted'}),{flag:'wx'});}
+        catch(e){if(e.code==='EEXIST')throw new PublicError('이미 보낸 요청이에요. 같은 요청의 결과를 확인해 주세요.',409,'generation-check');throw e;}
+        submitted=true;
         const upstream=await fetcher(`${ORIGIN}/ai/generate-image`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${secret}`},
           body:JSON.stringify(payload),signal:AbortSignal.timeout(timeoutMs)});
         if(!upstream.ok) {
@@ -284,21 +344,21 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
           throw naiError(upstream.status,body);
         }
         const png=extractPng(await readLimited(upstream,30*1024*1024));
-        const item={id:requestId,created:new Date().toISOString(),chatKey:b.chatKey,
-          image:`/user/images/naice-shot/${requestId}.png`,seed:b.options.seed,options:b.options,assembled,
-          snapshot:b.snapshot&&typeof b.snapshot==='object'?{scene:b.snapshot.scene??null,
-            // 프리샷 images keep their situation text so restoring from history brings it back.
-            ...(b.snapshot.mode==='free'?{mode:'free',...(typeof b.snapshot.freeText==='string'&&b.snapshot.freeText.length<=FREE_TEXT_STORED_LIMIT&&visibleLength(b.snapshot.freeText)<=FREE_TEXT_LIMIT?{freeText:b.snapshot.freeText}:{})}:{}),
-            ...(b.retainRawExtraction===true&&typeof b.snapshot.rawExtraction==='string'?{rawExtraction:stripReasoningBlocks(b.snapshot.rawExtraction)}:{})}:null,payload,version:SERVER_VERSION};
-        await serial(user,async()=>{
-          const entries=await ctx.store.ready();
-          await fs.writeFile(ctx.store.png(requestId),png,{flag:'wx'});
-          await fs.writeFile(ctx.store.record(requestId),JSON.stringify(item),{flag:'wx'});
-          await ctx.store.save([...entries,metaOf(item)]);
-        });
+        const pending={state:'received',item,png};
+        let recorded=false;
+        try{
+          await writeAtomic(journal,JSON.stringify({...pending,png:png.toString('base64')}));
+          recorded=true;
+          await serial(user,()=>finishGeneration(ctx,item,png));
+        }catch{
+          // Keep the last result in memory if the disk could not stage it at all.
+          if(!recorded)unsaved.set(user,pending);
+          throw new PublicError('그림은 받았지만 서버에 저장하지 못했어요. 같은 요청으로 저장을 다시 시도해 주세요.',500,'generation-save');
+        }
         res.json(item);
       }catch(e){
-        if(e.name==='TimeoutError'||e.name==='AbortError')e=new PublicError('NAI 응답 시간이 초과됐어요. 실제 생성·차감 여부는 NAI에서 확인해 주세요. 자동 재요청하지 않았어요.',504);
+        if(e.name==='TimeoutError'||e.name==='AbortError')e=new PublicError('NAI 응답 시간이 초과됐어요. 실제 생성·차감 여부는 NAI에서 확인해 주세요. 자동 재요청하지 않았어요.',504,'generation-check');
+        if(!(e instanceof PublicError))e=submitted?new PublicError('NovelAI 생성 결과를 확인하지 못했어요. 같은 요청의 상태를 확인해 주세요.',502,'generation-check'):new PublicError('서버에 요청을 준비하지 못했어요. NovelAI로 보내지 않았어요.',500,'generation-not-sent');
         fail(res,e);
       }finally{if(ownsLock)active.delete(user);}
     },

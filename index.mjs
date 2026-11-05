@@ -9,6 +9,8 @@ export async function init(router) {
   router.get('/draft',handlers.draft);
   router.post('/draft',handlers.draft);
   router.post('/generate',handlers.generate);
+  router.get('/generation',handlers.generation);
+  router.post('/generation',handlers.generation);
   router.post('/delete',handlers.delete);
   console.info('[NAIce Shot] server ready');
 }
