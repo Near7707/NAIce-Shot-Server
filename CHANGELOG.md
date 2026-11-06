@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.23 — 2026-11-06
+
+- Delete-all removes files left by interrupted generation recovery and checks that none remain. Uncertain charges stay marked separately from file removal.
+- Generation rejects empty chat keys. Old entries with an empty key remain deletable by ID.
+- Saving a draft drops invalid picture details while keeping the rest of the work.
+
 ## 0.1.22 — 2026-11-06
 
 - History by ID list: `POST /history` takes the same fields as `GET` plus `ids` (up to 5,000 picture IDs), and pages only those pictures inside the asked range. The reply adds `filtered:true` and `unfilteredCount` (the range's full count, for "delete all" questions); pending pictures are left out of a filtered page. Used by the extension's ★-only view (0.1.84). Feature flag `history-ids`.

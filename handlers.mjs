@@ -56,12 +56,13 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.22';
+const SERVER_VERSION='0.1.23';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
 const fail400=message=>new PublicError(message,400);
 const exists=async file=>{try{await fs.access(file);return true;}catch{return false;}};
+const fileStat=file=>fs.stat(file).catch(e=>{if(e.code==='ENOENT')return null;throw e;});
 async function unlinkQuiet(file){try{await fs.unlink(file);return true;}catch(e){if(e.code==='ENOENT')return false;throw e;}}
 async function writeAtomic(file,text){const tmp=`${file}.${randomUUID()}.tmp`;try{await fs.writeFile(tmp,text);await fs.rename(tmp,file);}finally{await unlinkQuiet(tmp);}}
 async function moveFile(from,to){try{await fs.rename(from,to);}catch(e){if(e.code!=='EXDEV')throw e;await fs.copyFile(from,to,fs.constants.COPYFILE_EXCL);await fs.unlink(from);}}
@@ -182,6 +183,8 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
   };
   const fail=(res,e)=>res.status(e instanceof PublicError?e.status:500).json({error:e instanceof PublicError?e.message:'요청 처리 중 내부 오류가 발생했어요. 설치 경로와 파일 접근 권한을 확인해 주세요.',...(e instanceof PublicError&&e.code?{code:e.code}:{})});
   const chatKeyOf=value=>{if(typeof value!=='string'||!value||value.length>1000)throw fail400('채팅 정보가 잘못됐어요.');return value;};
+  // Old versions accepted an empty chat key. Allow explicit ID cleanup for those records only.
+  const deletionKey=(value,all)=>value===''&&!all?'':chatKeyOf(value);
   const requestFolder=dirs=>path.join(dirs.root,'naice-shot-requests');
   const requestFile=(dirs,id)=>path.join(requestFolder(dirs),id+'.json');
   const validId=id=>typeof id==='string'&&ID.test(id);
@@ -205,9 +208,13 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         const bytes=memory?request.png.length:(await fs.stat(requestFile(dirs,id))).size;
         const pngBytes=await fs.stat(store.png(id)).then(x=>x.size,e=>{if(e.code==='ENOENT')return 0;throw e;});
         pending.push({id,chatKey:request.item.chatKey,created:request.item.created,bytes:bytes+pngBytes});
-      }else if(includeUncertain&&['submitted','rejected'].includes(request?.state)&&typeof request.chatKey==='string'){
-        // 0.1.22: not a picture. `request` marks it so deletion counts it apart from deleted pictures.
-        pending.push({id,chatKey:request.chatKey,bytes:0,request:request.state});
+      }else if(['submitted','rejected'].includes(request?.state)&&typeof request.chatKey==='string'){
+        // A failed recovery can leave files even if the journal still says "submitted".
+        const [png,record]=await Promise.all([fileStat(store.png(id)),fileStat(store.record(id))]);
+        if((png||record)&&!(png&&record&&await store.readRecord(id))){
+          pending.push({id,chatKey:request.chatKey,request:request.state,orphaned:true,
+            created:(png??record).mtime.toISOString(),bytes:(png?.size??0)+(record?.size??0)});
+        }else if(includeUncertain)pending.push({id,chatKey:request.chatKey,request:request.state});
       }
     }
     return pending;
@@ -258,20 +265,22 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       res.json(await generationState(ctx,id,{recover}));
     }catch(e){fail(res,e);}},
     deleteCheck:async(req,res)=>{try{
-      const ctx=context(req),{dirs,user,store}=ctx,b=req.body??{},chatKey=chatKeyOf(b.chatKey),ids=b.ids??[];
+      const ctx=context(req),{dirs,user,store}=ctx,b=req.body??{},all=b.all===true,chatKey=deletionKey(b.chatKey,all),ids=b.ids??[];
       if(!Array.isArray(ids)||ids.length>500||ids.some(id=>!validId(id)))throw fail400('확인할 이미지 ID가 잘못됐어요.');
       const result=await serial(user,async()=>{
-        const entries=await store.ready(),pending=await pendingRequests(ctx);
-        const present=new Set([...entries,...pending].map(entry=>entry.id)),absent=[];
+        const entries=await store.ready(),pending=await pendingRequests(ctx),pictures=[...entries,...pending];
+        const present=new Set(pictures.map(entry=>entry.id)),absent=[],unconfirmed=[];
         for(const id of new Set(ids)){
           if(present.has(id)||active.get(user)?.id===id)continue;
           const files=[store.png(id),store.record(id)];
-          const missing=await Promise.all(files.map(file=>fs.stat(file).then(()=>false,e=>{if(e.code==='ENOENT')return true;throw e;})));
-          if(missing.every(Boolean))absent.push(id);
+          if((await Promise.all(files.map(fileStat))).some(Boolean))continue;
+          absent.push(id);
+          const request=await readRequest(dirs,id).catch(e=>{if(e instanceof SyntaxError)return null;throw e;});
+          if(request?.state==='submitted'||request?.state==='discarded'&&request.unconfirmed===true)unconfirmed.push(id);
         }
-        const draft=b.all===true?await readDraftState(dirs,chatKey):null;
-        const remaining=[...entries,...pending].some(entry=>entry.chatKey===chatKey)||active.get(user)?.chatKey===chatKey;
-        return {absent,remaining,...(draft?{draftDeleted:draft.deleted,draftRevision:draft.revision}:{})};
+        const draft=all?await readDraftState(dirs,chatKey):null;
+        const remaining=pictures.some(entry=>entry.chatKey===chatKey)||active.get(user)?.chatKey===chatKey;
+        return {absent,remaining,...(unconfirmed.length?{unconfirmed}:{}),...(draft?{draftDeleted:draft.deleted,draftRevision:draft.revision}:{})};
       });
       res.json(result);
     }catch(e){fail(res,e);}},
@@ -335,7 +344,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       res.json(page);
     }catch(e){fail(res,e);}},
     delete:async(req,res)=>{try{
-      const ctx=context(req),{user,store,dirs}=ctx,b=req.body??{},chatKey=chatKeyOf(b.chatKey),all=b.all===true;
+      const ctx=context(req),{user,store,dirs}=ctx,b=req.body??{},all=b.all===true,chatKey=deletionKey(b.chatKey,all);
       const ids=all?[]:b.ids;
       if(!all&&(!Array.isArray(ids)||!ids.length||ids.length>500||ids.some(id=>typeof id!=='string'||!ID.test(id))))throw fail400('삭제할 이미지 ID가 잘못됐어요.');
       const result=await serial(user,async()=>{
@@ -355,16 +364,17 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
           if(indexed.has(entry.id)||entry.chatKey!==chatKey||(!all&&!wanted.has(entry.id)))continue;
           wanted.delete(entry.id);
           if(active.get(user)?.id===entry.id){failed.push(entry.id);continue;}
-          // 0.1.22 (P3-2): a request record without a picture (sent with no known result, or refused by NovelAI) is
-          // cleared, not counted as a deleted picture. One sent with no known result keeps "unconfirmed" in its marker.
+          // The journal state describes the upstream result. Count local file removal separately.
           const sentUnknown=entry.request==='submitted';
           try{
-            if(!entry.request){await unlinkQuiet(store.png(entry.id));await unlinkQuiet(store.record(entry.id));}
+            const removedPng=await unlinkQuiet(store.png(entry.id));
+            const removedRecord=await unlinkQuiet(store.record(entry.id));
             // Keep only the ID marker so a delayed retry can't send the discarded request again.
             await writeAtomic(requestFile(dirs,entry.id),JSON.stringify({state:'discarded',...(sentUnknown?{unconfirmed:true}:{})}));
             if(unsaved.get(user)?.item.id===entry.id)unsaved.delete(user);
-            if(entry.request){cleared.push(entry.id);if(sentUnknown)unconfirmed.push(entry.id);}
+            if(entry.request&&!removedPng&&!removedRecord)cleared.push(entry.id);
             else deleted.push(entry.id);
+            if(sentUnknown)unconfirmed.push(entry.id);
           }catch{failed.push(entry.id);}
         }
         const current=active.get(user);
@@ -373,7 +383,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         if(deleted.length)await store.save(keep).catch(()=>{}); // ready() rebuilds after record removal
         let workDeleted=false,workDeleteFailed=false;
         if(all&&!failed.length){try{workDeleted=(await tombstone(workFile(dirs,chatKey))).had;}catch{workDeleteFailed=true;}}
-        return {deleted,skipped,workDeleted,...(cleared.length?{cleared,unconfirmed}:{}),...(failed.length?{failed}:{}),...(workDeleteFailed?{workDeleteFailed:true}:{})};
+        return {deleted,skipped,workDeleted,...(cleared.length||unconfirmed.length?{cleared,unconfirmed}:{}),...(failed.length?{failed}:{}),...(workDeleteFailed?{workDeleteFailed:true}:{})};
       });
       res.json(result);
     }catch(e){fail(res,e);}},
@@ -381,7 +391,8 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       let user,requestId,ownsLock=false,submitted=false;
       try {
         const ctx=context(req);user=ctx.user;const b=req.body;
-        if(!b || !validId(b.requestId) || typeof b.chatKey!=='string'||b.chatKey.length>1000)throw new PublicError('요청 ID 또는 채팅 정보가 잘못됐어요.',400);
+        if(!b || !validId(b.requestId))throw fail400('요청 ID 또는 채팅 정보가 잘못됐어요.');
+        chatKeyOf(b.chatKey);
         requestId=b.requestId;
         // 0.1.18: the situation text is checked on its own, before NovelAI is called, and is never dropped silently.
         const free=b.snapshot?.freeText;

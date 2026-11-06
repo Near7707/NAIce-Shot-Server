@@ -491,3 +491,71 @@ test('0.1.22: history by ID list (favorites) pages only those pictures and keeps
   const plain=await post({chatKey:'chat-A'});assert.equal(plain.body.total,3);assert.equal(plain.body.filtered,undefined);
   assert.equal((await hist(s,{chatKey:'chat-A',ids:[a.id]})).total,3);
 });
+
+test('delete-all checks and removes a PNG left by a failed recovery after restart',async t=>{
+  const s=await setup(t),id=s.req.body.requestId,write=fs.writeFile,unlink=fs.unlink;
+  const record=path.join(s.root,'naice-shot-records',id+'.json'),journal=path.join(s.root,'naice-shot-requests',id+'.json');
+  const image=path.join(s.root,'images','naice-shot',id+'.png');
+  fs.writeFile=async (file,...args)=>{
+    if([record,journal].some(target=>String(file).startsWith(target+'.')))throw Object.assign(new Error('disk full'),{code:'ENOSPC'});
+    return write(file,...args);
+  };
+  const failed=response(),retry=response();
+  try{
+    await s.handlers.generate(s.req,failed);
+    await s.handlers.generation({user:s.req.user,method:'POST',body:{requestId:id}},retry);
+  }finally{fs.writeFile=write;}
+  assert.equal(failed.body.code,'generation-save');assert.equal(retry.body.state,'save-failed');
+  assert.equal(JSON.parse(await fs.readFile(journal,'utf8')).state,'submitted');
+  assert.deepEqual(await fs.readFile(image),png);
+
+  const restarted=createHandlers({readKey:()=>{throw Error('local cleanup does not need a key');}});
+  const req={user:s.req.user,body:{chatKey:'chat-A',all:true}};
+  const history=response();
+  await restarted.history({user:s.req.user,query:{chatKey:'chat-A'}},history);
+  assert.deepEqual(history.body.pending.map(entry=>[entry.id,entry.orphaned,entry.bytes]),[[id,true,png.length]]);
+  const check=async()=>{const r=response();await restarted.deleteCheck(req,r);return r.body.remaining;};
+  assert.equal(await check(),true,'the PNG is detectable without an ID in the check request');
+  const blocked=response();
+  fs.unlink=async (file,...args)=>{if(file===image)throw Object.assign(new Error('locked image'),{code:'EACCES'});return unlink(file,...args);};
+  try{await restarted.delete(req,blocked);}finally{fs.unlink=unlink;}
+  assert.deepEqual(blocked.body.failed,[id]);assert.equal(await check(),true);
+
+  const done=response();await restarted.delete(req,done);
+  assert.deepEqual(done.body.deleted,[id]);assert.deepEqual(done.body.cleared,[]);assert.deepEqual(done.body.unconfirmed,[id]);
+  assert.deepEqual(JSON.parse(await fs.readFile(journal,'utf8')),{state:'discarded',unconfirmed:true});
+  await assert.rejects(fs.stat(image),{code:'ENOENT'});
+  assert.equal(await check(),false);assert.equal(s.calls(),1);
+  const checked=response();
+  await restarted.deleteCheck({...req,body:{...req.body,ids:[id]}},checked);
+  assert.deepEqual(checked.body.absent,[id]);assert.deepEqual(checked.body.unconfirmed,[id]);
+});
+
+test('blank chat keys are rejected on generation and legacy items can only be deleted by matching ID',async t=>{
+  const s=await setup(t),reject=response();
+  await s.handlers.generate({...s.req,body:{...s.req.body,chatKey:''}},reject);
+  assert.equal(reject.statusCode,400);assert.equal(s.calls(),0);
+
+  const legacy=await gen(s),other=await gen(s,'chat-B');
+  const folder=path.join(s.root,'naice-shot-records');
+  await fs.writeFile(path.join(folder,legacy.id+'.json'),JSON.stringify({...legacy,chatKey:''}));
+  await fs.unlink(path.join(folder,'index.json'));
+  assert.equal((await del(s,{chatKey:'',all:true})).statusCode,400);
+  assert.deepEqual((await del(s,{chatKey:'chat-B',ids:[legacy.id]})).body.skipped,[legacy.id]);
+  const gone=await del(s,{chatKey:'',ids:[legacy.id,other.id]});
+  assert.deepEqual(gone.body.deleted,[legacy.id]);assert.deepEqual(gone.body.skipped,[other.id]);
+  const check=response();
+  await s.handlers.deleteCheck({user:s.req.user,body:{chatKey:'',ids:[legacy.id,other.id]}},check);
+  assert.deepEqual(check.body.absent,[legacy.id]);
+});
+
+test('draft saving drops invalid picture data but keeps editable work and valid seeds',async t=>{
+  const s=await setup(t),picture=await gen(s);
+  const call=async(method,body={})=>{const r=response();await s.handlers.draft({user:s.req.user,method,body,query:{chatKey:'chat-A'}},r);return r;};
+  const saved=await call('POST',{chatKey:'chat-A',expectedRevision:null,work:{scene:{characters:[],location:'Example scene'},
+    result:{...picture,seed:'<img src=x onerror=alert(1)>'},undoClear:{scene:{characters:[]},result:picture}}});
+  assert.equal(saved.statusCode,200);
+  const {work}=(await call('GET')).body;
+  assert.equal(work.scene.location,'Example scene');assert.equal(work.result,null);
+  assert.equal(work.undoClear.result.seed,picture.seed);assert.equal(work.undoClear.result.image,picture.image);
+});

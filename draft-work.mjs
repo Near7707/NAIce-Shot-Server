@@ -18,11 +18,13 @@ export function packWork(work,{retainRaw=false,undo=true}={}) {
   };
   if(!work?.scene||!Array.isArray(work.scene.characters))throw new Error('저장된 작업 형식을 확인해 주세요.');
   const result=work.result;
+  const validResult=typeof result?.id==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(result.id)&&
+    result.image===`/user/images/naice-shot/${result.id}.png`&&Number.isInteger(result.seed)&&result.seed>=0&&result.seed<=4294967295;
   const out={scene:clean(work.scene),raw:retainRaw?stripReasoningBlocks(String(work.raw??'')):'',
     finalOverride:clean(work.finalOverride),optionsOverride:clean(work.optionsOverride),isRestored:work.isRestored??(!!work.restoredFinal&&work.restoredFinal===work.finalOverride),
     finalText:typeof work.finalText==='string'?work.finalText:'',target:String(work.target??''),wish:String(work.wish??''),freeText:String(work.freeText??''),
     targetSource:clean(work.targetSource??null),targetShown:Number(work.targetShown)||10,
-    result:result?clean(Object.fromEntries(['id','image','seed','created','chatKey','assembled','options','snapshot'].filter(k=>result[k]!==undefined).map(k=>[k,result[k]]))):null,
+    result:validResult?clean(Object.fromEntries(['id','image','seed','created','chatKey','assembled','options','snapshot'].filter(k=>result[k]!==undefined).map(k=>[k,result[k]]))):null,
     undoClear:undo&&work.undoClear?packWork(work.undoClear,{retainRaw,undo:false}):null};
   if(work.label)out.label=String(work.label);
   if(JSON.stringify(out).length>1000000)throw new Error('작업 내용이 너무 커서 저장하지 못했어요.');
