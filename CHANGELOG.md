@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.24 — 2026-11-08
+
+- Opus V5 within the free conditions no longer needs `allowAnlas` while the base usage (`usage.percent`) is 2 % or more. At 1 % or below, when `isNegative` is true, or when the usage fields are missing, `/generate` answers 428 `usage-confirm` before calling NovelAI and writes no request record; the same request with `confirmUsage:true` is then sent. `allowAnlas` does not answer this question. Extra Usage (`purchasedPercent`) does not count yet (`V5_EXTRA_COUNTS` in `core.mjs`). New feature flag `usage-confirm`.
+
 ## 0.1.23 — 2026-11-06
 
 - Delete-all removes files left by interrupted generation recovery and checks that none remain. Uncertain charges stay marked separately from file removal.

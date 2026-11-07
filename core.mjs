@@ -1,4 +1,4 @@
-export const VERSION = '0.1.23';
+export const VERSION = '0.1.24';
 export const BRAND = 'NAIce Shot';
 export const SIZE_PRESETS = {
   portrait:{label:'세로 · 832 × 1216',width:832,height:1216},
@@ -289,14 +289,21 @@ export function buildPayload(assembled,options) {
   }};
 }
 // What a generation may cost, worded for the account (0.1.67; the same function decides on the server just before
-// sending). kind: free | uses (Anlas is used) | may (Opus V5: its own usage, Anlas when it runs out) | inactive
-// (subscription not active: not free) | unknown (not checked, or a needed field is missing: `missing`).
-// Only `free` is sent without consent. Rules (NovelAI docs, Nov 2026): older models such as V4.5 stay free for an
-// active Opus within the usual conditions (normal size, 28 steps or fewer, one image; text-to-image only, which is
-// all this extension sends); V5 has its own usage limit. Our own, conservative choices: a grace period is "unknown",
-// and a field that is missing or of the wrong kind is never read as false or 0. Only the fields the chosen model
-// needs are checked (V4.5 never needs `usage`). `perks.unlimitedImageGeneration` is no longer read: the account
-// reply checked on 2026-11-04 had no such field and the current schema does not declare it.
+// sending). kind: free | usage (Opus V5 with enough usage left) | ask (Opus V5 with little or no usage, or usage not
+// known) | uses (Anlas is used) | inactive (subscription not active: not free) | unknown (not checked, or a needed
+// account field is missing: `missing`). consent says what the server needs before sending: none | setting (the saved
+// "Anlas 사용 가능성 허용" switch) | once (a yes for this one request, asked even when the switch is on; 0.1.90).
+// Rules (NovelAI docs, Nov 2026): older models such as V4.5 stay free for an active Opus within the usual conditions
+// (normal size, 28 steps or fewer, one image; text-to-image only, which is all this extension sends); V5 has its own
+// usage, then Extra Usage, then Anlas. No request option keeps Anlas untouched, so V5 is never "free": the account
+// box only says which usage it goes by. Our own, conservative choices: a grace period is "unknown", and a field that
+// is missing or of the wrong kind is never read as false or 0. Only the fields the chosen model needs are checked (V4.5
+// never needs `usage`). `perks.unlimitedImageGeneration` is no longer read: the account reply checked on 2026-11-04 had
+// no such field and the current schema does not declare it.
+// 0.1.90 (user decision): V5 asks for this one request at V5_ASK_AT % of base usage or below. The Extra Usage is shown
+// but does not count until a real account shows it is used before Anlas (then set V5_EXTRA_COUNTS = true).
+export const V5_ASK_AT=1;
+export const V5_EXTRA_COUNTS=false;
 const MISSING='계정 정보에서 필요한 항목을 확인하지 못했어요. 무료 생성 여부를 확인할 수 없어요.';
 export function usageOf(subscription){
   const u=subscription?.usage,num=v=>typeof v==='number'&&Number.isFinite(v)?v:null;
@@ -306,18 +313,24 @@ export function usageOf(subscription){
 export function costGuard(options,subscription) {
   const normal=options.width*options.height<=1048576 && options.steps<=28;
   const v5=String(options.model??'').startsWith('nai-diffusion-5');
-  if(!subscription||typeof subscription!=='object')return {free:false,kind:'unknown',message:'비용 조건을 확인하지 못했어요.'}; // not checked yet
+  const setting=(kind,message,more={})=>({free:false,kind,consent:'setting',message,...more});
+  if(!subscription||typeof subscription!=='object')return setting('unknown','비용 조건을 확인하지 못했어요.'); // not checked yet
   // 0.1.68 (UI-067-02/03): the subscription state comes first, for every tier; a reply without a usable tier is "missing".
-  if(subscription.isGracePeriod===true)return {free:false,kind:'unknown',message:'구독 유예 기간이라 무료 생성 여부를 확인할 수 없어요.'};
-  if(subscription.active===false)return {free:false,kind:'inactive',message:'구독이 활성 상태가 아니라 무료 생성 대상이 아니에요.'};
-  if(typeof subscription.tier!=='number'||typeof subscription.active!=='boolean'||typeof subscription.isGracePeriod!=='boolean')return {free:false,kind:'unknown',missing:true,message:MISSING};
-  if(subscription.tier!==3)return {free:false,kind:'uses',message:'이 생성은 Anlas를 사용해요.'};
-  if(!normal)return {free:false,kind:'uses',message:'기본 무료 조건(기본 크기·28스텝 이하)을 넘어서 Anlas를 사용해요.'};
+  if(subscription.isGracePeriod===true)return setting('unknown','구독 유예 기간이라 무료 생성 여부를 확인할 수 없어요.');
+  if(subscription.active===false)return setting('inactive','구독이 활성 상태가 아니라 무료 생성 대상이 아니에요.');
+  if(typeof subscription.tier!=='number'||typeof subscription.active!=='boolean'||typeof subscription.isGracePeriod!=='boolean')return setting('unknown',MISSING,{missing:true});
+  if(subscription.tier!==3)return setting('uses','이 생성은 Anlas를 사용해요.');
+  if(!normal)return setting('uses','기본 무료 조건(기본 크기·28스텝 이하)을 넘어서 Anlas를 사용해요.');
   if(v5){
-    const u=usageOf(subscription);
-    if(!u||u.percent===null||u.isNegative===null)return {free:false,kind:'unknown',missing:true,message:MISSING};
-    if(u.isNegative)return {free:false,kind:'may',message:'V5 사용량을 지금 쓸 수 없어요. 생성하면 Anlas가 차감될 수 있어요.'};
-    return {free:false,kind:'may',message:'V5 사용량으로 생성해요. 부족하면 Anlas가 차감될 수 있어요.'};
+    const u=usageOf(subscription),may='이번 생성에서 Anlas가 차감될 수 있어요.';
+    const ask=(reason,message)=>({free:false,kind:'ask',consent:'once',reason,message,percent:u?.percent??null,purchasedPercent:u?.purchasedPercent??null});
+    if(!u||u.percent===null||u.isNegative===null)return ask('unknown',`V5 사용량을 확인하지 못했어요. ${may}`);
+    if(u.isNegative)return ask('negative',`V5 사용량을 지금 쓸 수 없어요. ${may}`);
+    const extra=u.purchasedPercent??0;
+    if(u.percent>V5_ASK_AT||V5_EXTRA_COUNTS&&extra>V5_ASK_AT)
+      return {free:false,kind:'usage',consent:'none',message:'V5 사용량으로 생성해요. 다 쓰면 Anlas가 차감될 수 있어요.',percent:u.percent,purchasedPercent:u.purchasedPercent};
+    if(u.percent<=0)return ask('empty',`V5 기본 사용량을 다 썼어요${extra>0?` (추가 구매 ${extra}%)`:''}. ${may}`);
+    return ask('low',`V5 사용량이 ${u.percent}% 남았어요. ${may}`);
   }
-  return {free:true,kind:'free',message:'Opus 무료 조건(기본 크기·28스텝 이하·1장)에 해당해요.'};
+  return {free:true,kind:'free',consent:'none',message:'Opus 무료 조건(기본 크기·28스텝 이하·1장)에 해당해요.'};
 }

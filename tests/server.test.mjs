@@ -47,9 +47,30 @@ test('server sends individual positive/negative slots, stores PNG and exact requ
   assert.doesNotMatch(JSON.stringify(res.body),/test-secret/);
   const again=response();await s.handlers.generate(s.req,again);assert.equal(again.body.id,res.body.id);assert.equal(s.calls(),1);
 });
-test('unknown V5 free eligibility is blocked on the server before image request',async t=>{
-  const s=await setup(t);s.req.body.allowAnlas=false;const res=response();await s.handlers.generate(s.req,res);assert.equal(res.statusCode,428);assert.equal(res.body.code,'anlas-consent');assert.match(res.body.error,/V5 사용량으로 생성해요\. 부족하면 Anlas가 차감될 수 있어요\. Anlas 사용 허용이 꺼져 있어서 보내지 않았어요\./);assert.equal(s.calls(),0);
-  s.req.body.allowAnlas=true;const next=response();await s.handlers.generate(s.req,next);assert.equal(next.statusCode,200);
+test('V5 usage (0.1.24): enough usage is sent without the switch; little or unknown usage asks for this one request before NovelAI',async t=>{
+  // 82 % left, switch off → sent at once.
+  {const s=await setup(t);s.req.body.allowAnlas=false;const res=response();await s.handlers.generate(s.req,res);assert.equal(res.statusCode,200);assert.equal(s.calls(),1);}
+  {const s=await setup(t,null,{...OPUS,usage:{...OPUS.usage,percent:2}});s.req.body.allowAnlas=false;const res=response();await s.handlers.generate(s.req,res);assert.equal(res.statusCode,200,'2 % is still enough');}
+  const asks=async(usage,pattern)=>{
+    const sub=usage===null?(({usage:_u,...rest})=>rest)(OPUS):{...OPUS,usage:{...OPUS.usage,...usage}};
+    const s=await setup(t,null,sub);
+    for(const allowAnlas of [false,true]){ // the saved switch does not answer this question
+      const body={...s.req.body,allowAnlas};const res=response();await s.handlers.generate({...s.req,body},res);
+      assert.equal(res.statusCode,428,JSON.stringify(usage));assert.equal(res.body.code,'usage-confirm');assert.match(res.body.error,pattern);assert.equal(s.calls(),0,'nothing sent');
+    }
+    // The same request ID, now with a yes for this one request → sent once (the refusal wrote no request record).
+    const ok=response();await s.handlers.generate({...s.req,body:{...s.req.body,allowAnlas:false,confirmUsage:true}},ok);assert.equal(ok.statusCode,200);assert.equal(s.calls(),1);
+  };
+  await asks({percent:1},/^V5 사용량이 1% 남았어요\. 이번 생성에서 Anlas가 차감될 수 있어요\.$/);
+  await asks({percent:0},/^V5 기본 사용량을 다 썼어요 \(추가 구매 100%\)\. 이번 생성에서 Anlas가 차감될 수 있어요\.$/);
+  await asks({percent:0,purchasedPercent:0},/^V5 기본 사용량을 다 썼어요\. 이번/);
+  await asks({isNegative:true},/^V5 사용량을 지금 쓸 수 없어요\./);
+  await asks({percent:'82'},/^V5 사용량을 확인하지 못했어요\./);
+  await asks(null,/^V5 사용량을 확인하지 못했어요\./);
+  // Outside the Opus free conditions V5 still wants the saved switch, and a yes for one request is not enough.
+  {const s=await setup(t,null,{...OPUS,tier:2});const body={...s.req.body,allowAnlas:false,confirmUsage:true};const res=response();await s.handlers.generate({...s.req,body},res);
+   assert.equal(res.statusCode,428);assert.equal(res.body.code,'anlas-consent');assert.equal(s.calls(),0);}
+  {const s=await setup(t);const res=response();await s.handlers.status({user:s.req.user,query:{quick:'1'}},res);assert.ok(res.body.features.includes('usage-confirm'));}
 });
 test('concurrent rejection does not release another request’s lock; completion does release it',async t=>{
   let finish;const blocked=new Promise(resolve=>{finish=resolve;});let started;const ready=new Promise(resolve=>{started=resolve;});
@@ -314,10 +335,8 @@ test('free check (0.1.15): an active Opus V4.5 without the old perk passes with 
  await blocked({...OPUS,active:false,isGracePeriod:true},/^구독 유예 기간이라/);
  await blocked({...OPUS,tier:2},/^이 생성은 Anlas를 사용해요/);
  await blocked({...OPUS,tier:1},/^이 생성은 Anlas를 사용해요/);
- await blocked(OPUS,/^V5 사용량으로 생성해요/,{v5:true});
- await blocked({...OPUS,usage:{...OPUS.usage,isNegative:true,percent:0}},/^V5 사용량을 지금 쓸 수 없어요/,{v5:true});
- const {usage:_u,...noUsage}=OPUS;await blocked(noUsage,/^계정 정보에서 필요한 항목을 확인하지 못했어요/,{v5:true});
  // V4.5 never needs usage.
+ const {usage:_u,...noUsage}=OPUS;
  {const s=await setup(t,null,noUsage);const res=response();await s.handlers.generate({...s.req,body:v45(s.req.body)},res);assert.equal(res.statusCode,200);}
  // A failed account check with consent off sends nothing.
  {const s=await setup(t,null,'fail');const res=response();await s.handlers.generate({...s.req,body:v45(s.req.body)},res);assert.equal(res.statusCode,502);assert.equal(res.body.code,'nai-account','the UI can tell a failed account check');assert.equal(s.calls(),0);}

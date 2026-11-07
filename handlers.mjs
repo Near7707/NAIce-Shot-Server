@@ -56,7 +56,7 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.23';
+const SERVER_VERSION='0.1.24';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
 const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
@@ -253,7 +253,7 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
       }catch{return {state:'save-failed'};}
     });
   }
-  const features=['paged-history','delete','private-records','all-history','history-kinds','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes','account-shape','generation-recovery','pending-history','delete-check','history-ids','delete-cleared'];
+  const features=['paged-history','delete','private-records','all-history','history-kinds','privacy-controls','draft-work','draft-delete','free-text','draft-tombstone','nai-error-codes','account-shape','generation-recovery','pending-history','delete-check','history-ids','delete-cleared','usage-confirm'];
   return {
     generation:async(req,res)=>{try{
       const ctx=context(req),recover=req.method==='POST',id=recover?req.body?.requestId:req.query?.requestId;
@@ -419,8 +419,11 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         try{sub=await subscription(secret);}catch(e){if(b.allowAnlas!==true)throw e;}
         if(!secret)throw new PublicError('NAI 키가 없어요.',400);
         const guard=costGuard(b.options,sub);
-        // The extension's own consent block, distinct from NovelAI's errors (428, code anlas-consent).
-        if(!guard.free && b.allowAnlas!==true)throw new PublicError(`${guard.message} Anlas 사용 허용이 꺼져 있어서 보내지 않았어요.`,428,'anlas-consent');
+        // The extension's own consent blocks, distinct from NovelAI's errors (428), both before anything is sent:
+        // anlas-consent wants the saved switch; usage-confirm (0.1.24, Opus V5 with little or unknown usage) wants a yes
+        // for this one request, even with the switch on. The extension then sends the same request once more.
+        if(guard.consent==='setting'&&b.allowAnlas!==true)throw new PublicError(`${guard.message} Anlas 사용 허용이 꺼져 있어서 보내지 않았어요.`,428,'anlas-consent');
+        if(guard.consent==='once'&&b.confirmUsage!==true)throw new PublicError(guard.message,428,'usage-confirm');
         const item={id:requestId,created:new Date().toISOString(),chatKey:b.chatKey,
           image:`/user/images/naice-shot/${requestId}.png`,seed:b.options.seed,options:b.options,assembled,
           snapshot:b.snapshot&&typeof b.snapshot==='object'?{scene:b.snapshot.scene??null,
