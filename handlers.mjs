@@ -56,9 +56,9 @@ async function readLimited(response,limit) {
   for await(const chunk of response.body){total+=chunk.length;if(total>limit)throw new Error('NAI 응답 크기 한도를 넘었어요.');chunks.push(chunk);}
   return Buffer.concat(chunks);
 }
-const SERVER_VERSION='0.1.24';
+const SERVER_VERSION='0.1.25';
 // Oldest UI that works with this server. Raise it when a server change needs a newer UI.
-const MIN_CLIENT_VERSION='0.1.44'; // 0.1.44 re-reads saved work after deleting it (deletion markers)
+const MIN_CLIENT_VERSION='0.1.90'; // 0.1.90 answers usage-confirm (asks for one Opus V5 request); 0.1.44 re-read saved work after deleting it
 const RECORDS_DIR='naice-shot-records',INDEX_FILE='index.json';
 const fail400=message=>new PublicError(message,400);
 const exists=async file=>{try{await fs.access(file);return true;}catch{return false;}};
@@ -422,8 +422,10 @@ export function createHandlers({readKey,fetcher=globalThis.fetch,timeoutMs=18000
         // The extension's own consent blocks, distinct from NovelAI's errors (428), both before anything is sent:
         // anlas-consent wants the saved switch; usage-confirm (0.1.24, Opus V5 with little or unknown usage) wants a yes
         // for this one request, even with the switch on. The extension then sends the same request once more.
+        // 0.1.25 (GPT P3-1): usage-confirm answers 400, not 428. UI 0.1.90+ goes by the code; an older UI cannot ask
+        // and reads a 400 as "not sent", so its request is not left as "결과 확인 필요" (its status shows the update).
         if(guard.consent==='setting'&&b.allowAnlas!==true)throw new PublicError(`${guard.message} Anlas 사용 허용이 꺼져 있어서 보내지 않았어요.`,428,'anlas-consent');
-        if(guard.consent==='once'&&b.confirmUsage!==true)throw new PublicError(guard.message,428,'usage-confirm');
+        if(guard.consent==='once'&&b.confirmUsage!==true)throw new PublicError(guard.message,400,'usage-confirm');
         const item={id:requestId,created:new Date().toISOString(),chatKey:b.chatKey,
           image:`/user/images/naice-shot/${requestId}.png`,seed:b.options.seed,options:b.options,assembled,
           snapshot:b.snapshot&&typeof b.snapshot==='object'?{scene:b.snapshot.scene??null,

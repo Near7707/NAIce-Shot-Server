@@ -56,21 +56,25 @@ test('V5 usage (0.1.24): enough usage is sent without the switch; little or unkn
     const s=await setup(t,null,sub);
     for(const allowAnlas of [false,true]){ // the saved switch does not answer this question
       const body={...s.req.body,allowAnlas};const res=response();await s.handlers.generate({...s.req,body},res);
-      assert.equal(res.statusCode,428,JSON.stringify(usage));assert.equal(res.body.code,'usage-confirm');assert.match(res.body.error,pattern);assert.equal(s.calls(),0,'nothing sent');
+      assert.equal(res.statusCode,400,JSON.stringify(usage));assert.equal(res.body.code,'usage-confirm');assert.match(res.body.error,pattern);assert.equal(s.calls(),0,'nothing sent');
     }
     // The same request ID, now with a yes for this one request → sent once (the refusal wrote no request record).
     const ok=response();await s.handlers.generate({...s.req,body:{...s.req.body,allowAnlas:false,confirmUsage:true}},ok);assert.equal(ok.statusCode,200);assert.equal(s.calls(),1);
   };
   await asks({percent:1},/^V5 사용량이 1% 남았어요\. 이번 생성에서 Anlas가 차감될 수 있어요\.$/);
-  await asks({percent:0},/^V5 기본 사용량을 다 썼어요 \(추가 구매 100%\)\. 이번 생성에서 Anlas가 차감될 수 있어요\.$/);
-  await asks({percent:0,purchasedPercent:0},/^V5 기본 사용량을 다 썼어요\. 이번/);
+  await asks({percent:0},/^V5 기본 사용량이 0%로 표시돼요 \(추가 구매 100%\)\. 이번 생성에서 Anlas가 차감될 수 있어요\.$/);
+  await asks({percent:0,purchasedPercent:0},/^V5 기본 사용량이 0%로 표시돼요\. 이번/);
   await asks({isNegative:true},/^V5 사용량을 지금 쓸 수 없어요\./);
   await asks({percent:'82'},/^V5 사용량을 확인하지 못했어요\./);
   await asks(null,/^V5 사용량을 확인하지 못했어요\./);
+  // 0.1.25 (GPT P3-2): the schema's percent is a whole number from 0; 1.5 or -1 is not read as enough usage.
+  await asks({percent:1.5},/^V5 사용량을 확인하지 못했어요\./);
+  await asks({percent:-1},/^V5 사용량을 확인하지 못했어요\./);
   // Outside the Opus free conditions V5 still wants the saved switch, and a yes for one request is not enough.
   {const s=await setup(t,null,{...OPUS,tier:2});const body={...s.req.body,allowAnlas:false,confirmUsage:true};const res=response();await s.handlers.generate({...s.req,body},res);
    assert.equal(res.statusCode,428);assert.equal(res.body.code,'anlas-consent');assert.equal(s.calls(),0);}
-  {const s=await setup(t);const res=response();await s.handlers.status({user:s.req.user,query:{quick:'1'}},res);assert.ok(res.body.features.includes('usage-confirm'));}
+  {const s=await setup(t);const res=response();await s.handlers.status({user:s.req.user,query:{quick:'1'}},res);assert.ok(res.body.features.includes('usage-confirm'));
+   assert.equal(res.body.minClient,'0.1.90','a UI that cannot ask is told to update (0.1.25)');}
 });
 test('concurrent rejection does not release another request’s lock; completion does release it',async t=>{
   let finish;const blocked=new Promise(resolve=>{finish=resolve;});let started;const ready=new Promise(resolve=>{started=resolve;});

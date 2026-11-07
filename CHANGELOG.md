@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.25 — 2026-11-08
+
+- `usage-confirm` now answers 400 instead of 428 (still before NovelAI, no request record). Extension 0.1.90 and later go by the code; an older extension, which cannot ask, treats a 400 as "not sent" instead of leaving "결과 확인 필요".
+- `minClient` is 0.1.90, so an older extension shows its update notice.
+- V5 `usage.percent` / `purchasedPercent` count only as whole numbers from 0 (the schema's type); 1.5 or −1 is "not checked" and asks (shared `core.mjs`). At 0 % the message says "V5 기본 사용량이 0%로 표시돼요".
+
 ## 0.1.24 — 2026-11-08
 
 - Opus V5 within the free conditions no longer needs `allowAnlas` while the base usage (`usage.percent`) is 2 % or more. At 1 % or below, when `isNegative` is true, or when the usage fields are missing, `/generate` answers 428 `usage-confirm` before calling NovelAI and writes no request record; the same request with `confirmUsage:true` is then sent. `allowAnlas` does not answer this question. Extra Usage (`purchasedPercent`) does not count yet (`V5_EXTRA_COUNTS` in `core.mjs`). New feature flag `usage-confirm`.

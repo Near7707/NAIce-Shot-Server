@@ -1,4 +1,4 @@
-export const VERSION = '0.1.24';
+export const VERSION = '0.1.25';
 export const BRAND = 'NAIce Shot';
 export const SIZE_PRESETS = {
   portrait:{label:'세로 · 832 × 1216',width:832,height:1216},
@@ -307,8 +307,10 @@ export const V5_EXTRA_COUNTS=false;
 const MISSING='계정 정보에서 필요한 항목을 확인하지 못했어요. 무료 생성 여부를 확인할 수 없어요.';
 export function usageOf(subscription){
   const u=subscription?.usage,num=v=>typeof v==='number'&&Number.isFinite(v)?v:null;
+  // 0.1.91 (GPT P3-2): the schema's percent fields are whole numbers from 0; 1.5 or -1 is read as "not checked".
+  const pct=v=>Number.isInteger(v)&&v>=0?v:null;
   if(!u||typeof u!=='object')return null;
-  return {percent:num(u.percent),purchasedPercent:num(u.purchasedPercent),isNegative:typeof u.isNegative==='boolean'?u.isNegative:null,timeUntilNextPercent:num(u.timeUntilNextPercent)};
+  return {percent:pct(u.percent),purchasedPercent:pct(u.purchasedPercent),isNegative:typeof u.isNegative==='boolean'?u.isNegative:null,timeUntilNextPercent:num(u.timeUntilNextPercent)};
 }
 export function costGuard(options,subscription) {
   const normal=options.width*options.height<=1048576 && options.steps<=28;
@@ -329,7 +331,7 @@ export function costGuard(options,subscription) {
     const extra=u.purchasedPercent??0;
     if(u.percent>V5_ASK_AT||V5_EXTRA_COUNTS&&extra>V5_ASK_AT)
       return {free:false,kind:'usage',consent:'none',message:'V5 사용량으로 생성해요. 다 쓰면 Anlas가 차감될 수 있어요.',percent:u.percent,purchasedPercent:u.purchasedPercent};
-    if(u.percent<=0)return ask('empty',`V5 기본 사용량을 다 썼어요${extra>0?` (추가 구매 ${extra}%)`:''}. ${may}`);
+    if(u.percent===0)return ask('empty',`V5 기본 사용량이 0%로 표시돼요${extra>0?` (추가 구매 ${extra}%)`:''}. ${may}`);
     return ask('low',`V5 사용량이 ${u.percent}% 남았어요. ${may}`);
   }
   return {free:true,kind:'free',consent:'none',message:'Opus 무료 조건(기본 크기·28스텝 이하·1장)에 해당해요.'};
