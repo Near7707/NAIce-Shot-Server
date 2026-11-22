@@ -54,6 +54,23 @@ git으로 설치했다면 **실리태번을 켤 때마다 자동으로 최신 �
 - **확장에서 "서버 플러그인을 찾지 못했어요"가 떠요:** 위와 같아요. 실리태번을 완전히 껐다 켜야 플러그인을 다시 읽어요.
 - **"서버 플러그인이 이전 버전이에요"가 떠요:** 실리태번을 재시작하면 자동 업데이트돼요. 자동 업데이트를 껐다면 이 폴더에서 `git pull` 후 재시작해요.
 
+## 삭제
+
+1. 그림도 지우려면 먼저 확장의 이력에서 그림을 지워요. 그림과 생성 기록이 함께 지워져요.
+2. 실리태번의 확장 관리(Manage extensions)에서 NAIce Shot 확장을 삭제해요.
+3. 실리태번을 끄고 `plugins/naice-shot-server` 폴더를 통째로 지워요. 휴대폰(Termux)에서는 `rm -rf ~/SillyTavern/plugins/naice-shot-server`예요.
+4. 실리태번을 다시 켜요.
+
+다른 서버 플러그인을 쓰고 있다면 `config.yaml`의 `enableServerPlugins`는 그대로 두세요.
+
+아래는 자동으로 지워지지 않고 내 사용자 데이터 폴더(보통 `data/default-user/`)에 남아요. 모두 없애려면 직접 지워 주세요.
+
+- 생성한 그림: `user/images/naice-shot/`
+- 생성 기록: `naice-shot-records/`
+- 그리기창의 마지막 작업: `naice-shot-work/`
+
+확장 설정과 채팅 속 첨부 정보도 남지만, 확장이 없으면 쓰이지 않아요.
+
 버전별 변경 내용은 [CHANGELOG.md](CHANGELOG.md)에 있어요.
 
 ## For developers (English)
