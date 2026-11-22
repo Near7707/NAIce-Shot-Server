@@ -1,5 +1,7 @@
 # NAIce Shot Server
 
+English: install and update steps are in the extension's [README-en](https://github.com/Near7707/NAIce-Shot/blob/main/README-en.md#2-install-the-server-plugin-once).
+
 [NAIce Shot](https://github.com/Near7707/NAIce-Shot) 확장과 함께 쓰는 **실리태번 서버 플러그인**이에요. 확장만으로는 그림을 만들 수 없어서 둘 다 설치해야 해요.
 
 - 실리태번에 저장된 NovelAI 키로 그림을 요청해요. 키는 서버 밖으로 나가지 않아요.
