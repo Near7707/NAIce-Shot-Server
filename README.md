@@ -1,6 +1,6 @@
 # NAIce Shot Server
 
-English: install and update steps are in the extension's [README-en](https://github.com/Near7707/NAIce-Shot/blob/main/README-en.md#2-install-the-server-plugin-once).
+English: install and update steps are in the extension's [README-en](https://github.com/Near7707/NAIce-Shot/blob/main/README.md#2-install-the-server-plugin-once).
 
 [NAIce Shot](https://github.com/Near7707/NAIce-Shot) 확장과 함께 쓰는 **실리태번 서버 플러그인**이에요. 확장만으로는 그림을 만들 수 없어서 둘 다 설치해야 해요.
 
@@ -20,7 +20,7 @@ English: install and update steps are in the extension's [README-en](https://git
 
 폴더는 반드시 `plugins/` 바로 아래(`plugins/naice-shot-server/index.mjs`)에 있어야 해요. 실리태번의 키 관리 기능을 그 위치 기준으로 불러오기 때문이에요.
 
-확장 설치 방법은 [NAIce Shot README](https://github.com/Near7707/NAIce-Shot)를 봐 주세요.
+확장 설치 방법은 [NAIce Shot README(한국어)](https://github.com/Near7707/NAIce-Shot/blob/main/README.ko.md)를 봐 주세요.
 
 ## 업데이트
 
